@@ -122,32 +122,69 @@
   nguồn Cydia ở nhánh `gh-pages` (https://itovn.github.io/GramMusic/ — `tools/update-cydia-repo.sh`). Trước khi đưa lên: rà khoá /
   IP / số điện thoại / mã chat / tên bài trong thư viện của anh khỏi tài liệu.
 
+### Sau 1.0.0
+
 - Ảnh giao diện cho trang giới thiệu (dữ liệu mẫu tự đặt: 5 nguồn, 19 bài, bìa và lời tự vẽ / tự viết): Thư viện, Nguồn, Đang phát
-  có lời chạy — chụp bằng lệnh thử `snap` (vẽ lại cửa sổ app, không dính nút AssistiveTouch), ghép thanh trạng thái 9:41.
+  có lời chạy — chụp bằng lệnh thử `snap` (vẽ lại cửa sổ app, không dính nút AssistiveTouch), ghép thanh trạng thái 9:41. Lúc đổi sang
+  bộ dữ liệu mẫu anh tưởng mất playlist — lần sau báo trước khi đổi, chụp xong trả ngay.
 - Cydia không hiện gói trong nguồn GramMusic: máy đang cài bản thử `1.0.0-1+debug` (mới hơn bản trên nguồn → Cydia coi là gói cài tay).
   Cài lại bản phát hành là hết; sau mỗi lần thử trên máy anh dùng thì cài lại bản phát hành.
 
 ## 17/11/2026 — phát hành 1.0.1
 
-- Dòng mô tả gói trong Cydia viết không dấu (M21) — Cydia trên iOS 5 / 6 hiện chữ có dấu ở dòng này thành «?». App không đổi gì.
-  `symcheck` 340 ký hiệu, thiếu 0 trên iOS 5.1.1 (iPad 1).
-- Cùng sửa nguồn Cydia + `control` của Côn Bằng TV Legacy, TubeMini, Roza, GramMini.
+- Dòng mô tả gói trong Cydia viết không dấu (M21) — Cydia 1.1.30 trên iOS 5 / 6 đổi dòng này sang US-ASCII qua `libapt-pkg`, chữ có
+  dấu thành «?» (ảnh chụp: «Nghe nh??c t?? Telegram tr?n…»). App không đổi gì.
+- Gói 3.122.250 byte; `symcheck` 340 ký hiệu, thiếu 0 trên iOS 5.1.1 (iPad 1). Nguồn Cydia, trang giới thiệu, trang mô tả gói,
+  GitHub **v1.0.1**.
+- Anh nhờ sửa cùng cho **Côn Bằng TV Legacy, TubeMini, Roza, GramMini**: sửa `control` trong mã nguồn (bản sau tự đúng) + sửa dòng
+  mô tả trong nguồn Cydia đang chạy của từng app (không dựng lại app); kiểm mã băm trên trang — khớp cả 5 nguồn. Tab «Đã cài đặt»
+  của các app đó còn «?» tới bản sau của từng app.
 
-## 17/11/2026 — mất tiếng khi mạng chập chờn (M22)
+## 17/11/2026 — mất tiếng khi mạng chập chờn (M22), cổng phát bị thu hồi (M23)
 
-- Anh báo «đang nghe thì app tự thoát» — thật ra mediaserverd bị iOS giết (chờ quá 10 giây), app coi là bài lỗi rồi dừng. Sửa ở lõi
-  (giữ kết nối khi tải lỗi tạm thời, `play.ready`) và app (tua khi có dữ liệu, không hỏi thuộc tính AVPlayerItem mỗi lần, dựng lại
-  trình phát khi mediaserverd khởi động lại). Thử trên iPhone 5: hết bị giết; giết tay mediaserverd → 3 giây sau phát tiếp đúng chỗ.
-  Lõi 38 test, gm-net 27 test.
-- Anh báo (iPad mini): để app nghỉ lâu rồi vào lại không phát được — iOS thu hồi cổng phát 127.0.0.1 của app bị treo (lỗi -1004).
-  Lõi mở lại cổng (giữ số cổng), app gọi khi hoạt động lại / trước khi phát / khi gặp -1004 (M23). Tái hiện thật trên iPad mini (máy
-  tự khoá): cổng bị thu hồi, mở app là mở lại, phát được.
+- **M22** — anh báo «đang nghe thì app tự thoát» (iPhone 5): app không crash; **mediaserverd** bị iOS giết vì treo quá 10 giây (hôm đó
+  4 lần: 16:06, 16:28, 17:26, 18:52). Mạng chậm → cổng phát đóng kết nối / AVPlayer tua tới chỗ chưa có dữ liệu → mediaserverd chặn
+  lúc mở đoạn đọc mới; app hỏi `duration` đúng lúc đó → hết 10 giây iOS giết mediaserverd → app coi là bài lỗi, nhảy bài rồi dừng.
+  - Lõi: lỗi tải tạm thời giữa lúc trả dữ liệu thì giữ kết nối, chờ rồi thử lại; mở WAV hỏng thì thử lại 3 lần; lệnh `play.ready`.
+  - App: tua / mở giữa bài chỉ khi có dữ liệu; không hỏi `duration` / `currentTime` / `rate` của AVPlayer mỗi lần; mediaserverd
+    khởi động lại → dựng lại trình phát, phát tiếp đúng bài, đúng chỗ (quá 3 lần trong 2 phút thì tạm dừng, báo).
+  - Thử trên iPhone 5: mở bài FLAC ở giây 228 (trước khi sửa: mediaserverd bị giết 6 lần liền) → tua ngay; giết tay mediaserverd →
+    3 giây sau phát tiếp ở đúng giây 277; tua tới chỗ chưa tải → chờ 3 giây rồi tua. Không còn báo cáo mediaserverd nào.
+- **M23** — anh báo (iPad mini 1): để app nghỉ lâu rồi vào lại không phát được — mọi bài lỗi `-1004` tới cổng phát 127.0.0.1.
+  Tạm dừng → app bị treo; máy khoá màn hình → iOS thu hồi cổng nghe của app. Làm như Côn Bằng TV (bản vá `0002-revive-local-ports`):
+  - Lõi: `stream.revive` — thử kết nối vào chính cổng, chết thì mở lại đúng số cổng cũ; `play.url` cũng kiểm trước khi đưa địa chỉ;
+    `stream.drop` để thử.
+  - App: gọi khi hoạt động lại, trước khi phát (cả từ màn hình khoá / tai nghe), và khi item lỗi `-1004` (mở lại cổng, phát lại đúng
+    bài thay vì nhảy bài).
+  - Tái hiện thật trên iPad mini: dừng nhạc, app nằm nền 6 phút, máy tự khoá 7 phút → lõi ghi «Bad file descriptor» (cổng đã bị thu
+    hồi); mở app → mở lại đúng cổng sau 1 ms, bấm phát được. iPhone 5: giả thu hồi bằng `stream.drop` — bấm phát / mở lại app đều
+    mở lại cổng, phát tiếp. Nằm nền 10 phút mà máy không khoá thì iOS chưa thu hồi.
+- Test lõi: 39 (thêm `transient_errors_keep_connection_open`, `ready_at_waits_for_data_at_position`, `revive_reopens_reclaimed_port`;
+  tệp mẫu `tests/data/noise44_8s.flac`), gm-net 27.
 
 ## 17/11/2026 — phát hành 1.0.2
 
-- Sửa mất tiếng khi mạng chập chờn (M22) và không phát được sau khi app nằm nền lâu (M23). Anh thử trên iPad mini: ổn.
+- Gồm M22 + M23. Anh thử trên iPad mini: ổn → phát hành.
+- Gói 3.139.394 byte (sha256 `2c57290a…`), không còn mã thử; `symcheck` 341 ký hiệu, thiếu 0 trên iOS 6.1.4 (iPhone 5), iOS 6.1.3
+  (iPad mini 1), iOS 5.1.1 (iPad 1).
+- Nguồn Cydia có 1.0.0 / 1.0.1 / 1.0.2 (mã băm khớp trên trang), trang giới thiệu «Bản 1.0.2», trang mô tả gói có ghi chú bản mới,
+  GitHub **v1.0.2** (tệp `.deb` khớp từng byte với bản trên nguồn Cydia).
+- Đã cài bản phát hành 1.0.2 trên iPhone 5, iPad mini 1 (thay bản thử).
+
+### Máy thử
+
+- Thêm **iPhone 5 thứ hai (đen, iOS 6.1.4)**. Công cụ `tools-local/ios.sh`: `iphone` = máy trắng (máy chính, có dữ liệu GramMusic),
+  `iphone-den` = máy đen (trước đó `iphone` lấy nhầm máy đen → GramMusic 1.0.2 được cài lên máy đen ngoài ý định; anh cho giữ làm
+  máy thử). Đã chép công cụ thử `cblaunch` / `cbscreen` / `cbsymcheck` (của Côn Bằng TV) sang, chạy `uicache`, khởi động lại
+  SpringBoard — GramLockControl gắn được khung trên màn hình khoá. App trên máy đen chưa đăng nhập (anh tự đăng nhập — không chép phiên).
+- Máy thử hiện có: iPhone 5 trắng + đen (iOS 6.1.4), iPad mini 1 (iOS 6.1.3), iPad 1 (iOS 5.1.1 — dùng chung với phiên Roza).
 
 ### Còn lại
 
-- [ ] Ảnh màn hình khoá có khung GramLockControl cho trang giới thiệu (cần anh bấm nút nguồn).
-- [ ] OTA (tự cập nhật như GramMini); mở bài FLAC nhanh hơn khi mạng chậm; iPad 1 đo giải mã + RAM.
+- [ ] Ảnh màn hình khoá có khung GramLockControl cho trang giới thiệu (cần anh bấm nút nguồn; dữ liệu mẫu).
+- [ ] OTA (tự cập nhật như GramMini).
+- [ ] Mở bài FLAC nhanh hơn khi mạng chậm (lúc mở, AVPlayer đọc thử cuối tệp WAV → lõi phải tải phần cuối tệp FLAC trước).
+- [ ] Lỗi tải của một khúc đang làm hỏng cả lần chờ khúc khác của cùng bài (lỗi lưu chung theo bài) — đã đỡ bằng thử lại; nên tách
+  lỗi theo từng khúc.
+- [ ] iPad 1: đo giải mã + RAM.
+- [ ] iPhone 5 đen: anh đăng nhập để thử GramMusic trên máy thứ hai.
