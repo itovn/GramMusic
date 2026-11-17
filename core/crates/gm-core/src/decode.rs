@@ -366,6 +366,11 @@ impl Pcm {
         self.song.key()
     }
 
+    /// Số khúc WAV.
+    pub fn blocks(&self) -> u32 {
+        self.n
+    }
+
     /// Byte WAV mỗi giây (nhịp nghe).
     pub fn bytes_per_sec(&self) -> f64 {
         if self.p.ch_out == 0 {

@@ -239,3 +239,35 @@ dựng, giao diện) — ghi ở đây những gì riêng của GramMusic.
   trong `Packages` của nguồn Cydia đang chạy (tính lại `.gz` / `.bz2` / mã băm trong `Release`), không dựng lại app của các dự án đó.
 - Bài học khi sửa nguồn Cydia trên máy Windows: git có `core.autocrlf=true` — repo không có `.gitattributes` (TubeMini) thì `Packages`
   lấy về mang CRLF; băm theo bản LF và commit với `-c core.autocrlf=false`, kẻo mã băm trong `Release` lệch với tệp trên trang.
+
+## M22. Không để mediaserverd chờ quá 10 giây — mất tiếng khi mạng chập chờn — 17/11/2026
+
+- Anh báo (iPhone 5, 18:52): đang nghe thì «app tự thoát». App không crash (vẫn chạy); **mediaserverd** (dịch vụ âm thanh của iOS) bị giết:
+  báo cáo `/Library/Logs/CrashReporter/mediaserverd-*.plist`, mã `0xbe18d1ee`, lý do `fig rpc timeout -- itemremote_CopyProperty
+  [ Server_Duration ]`. Hôm đó có 4 lần (16:06, 16:28, 17:26, 18:52), lần nào GramMusic cũng đang phát.
+- Cơ chế (iOS 5 / 6): AVPlayer chạy trong mediaserverd; app hỏi thuộc tính của AVPlayerItem (`duration`, `loadedTimeRanges`…) là
+  gọi sang mediaserverd **và chờ**. Quá ~10 giây không trả lời thì iOS giết mediaserverd → mọi item báo lỗi `-11819`
+  (AVErrorMediaServicesWereReset), trình phát cũ hỏng. Bản cũ coi đó là bài lỗi → nhảy qua 2 bài nữa (cũng lỗi) → dừng hẳn.
+- mediaserverd chặn khi **mở một đoạn đọc mới** (sau khi tua, hoặc khi cổng phát đóng kết nối) mà đoạn đó chưa có dữ liệu — mạng
+  chậm, lõi chưa tải / giải kịp. Đang đọc dở mà phải chờ (nhịp nghe M10) thì không sao. Giải ký hiệu ảnh chụp trạng thái: lần 18:52 luồng
+  chính kẹt ở `-[GMPlayer duration]` ← `updateNowPlaying` ← KVO `rate` (vừa hết dữ liệu); lúc thử lại (mở bài ở giây 222 rồi tua)
+  luồng chính kẹt trong chính AVFoundation (khối của nó trên hàng đợi chính hỏi `PlayableTimeIntervals`) — app có tránh gọi cũng không
+  đủ, phải tránh để mediaserverd chặn lâu.
+- Sửa:
+  - Lõi: lỗi tải tạm thời (NETWORK / TIMEOUT / FLOOD_WAIT, «quá lâu») giữa lúc trả WAV / tệp gốc → **giữ kết nối**, chờ 2 giây rồi
+    thử lại (trước: đóng → AVPlayer mở lại đoạn đọc → chặn). Mở WAV hỏng thì thử lại 3 lần trước khi trả 500.
+  - Lõi: lệnh `play.ready {key, pos, wait}` — chờ tới khi khúc chứa giây `pos` (+ khúc sau) đã giải / đã tải; hết giờ trả
+    `ready: false`.
+  - App: tua (và mở bài ở giữa bài — Nghe tiếp, dựng lại trình phát) chỉ ra lệnh cho AVPlayer khi `play.ready` báo có; trong lúc chờ:
+    vị trí hiện chỗ mới, nhịp nghe dời tới đó, mở giữa bài thì chưa phát (khỏi nghe đoạn đầu bài).
+  - App: không hỏi `AVPlayerItem.duration` / `currentTime` / `rate` mỗi lần cần — độ dài đọc từ AVURLAsset lúc nạp, vị trí từ
+    `addPeriodicTimeObserver` (+ thời gian trôi, tối đa 1 giây), tốc độ lúc trình phát báo đổi.
+  - App: mediaserverd khởi động lại (`kAudioSessionProperty_ServerDied` — có cả iOS 5; hoặc item lỗi `-11819`) → bỏ trình phát cũ,
+    chờ 1,5 giây, tạo trình phát mới, mở lại đúng bài ở đúng chỗ. Quá 3 lần trong 2 phút thì tạm dừng và báo (khỏi vòng lặp).
+- Thử trên iPhone 5 (bản thử): mở lại bài FLAC ở giây 228 — có dữ liệu, tua ngay; `killall -9 mediaserverd` lúc đang phát → 3 giây sau
+  phát tiếp ở đúng giây 277; tua tới giây 290 của bài FLAC chưa tải → chờ 3 giây rồi tua. Không còn báo cáo mediaserverd nào. Trước khi
+  sửa, mở bài ở giây 222 lúc mạng chậm làm mediaserverd bị giết lặp lại mỗi 11 giây (6 lần liền).
+- Test lõi: `transient_errors_keep_connection_open` (khúc giữa «mất mạng» 1,5 giây — bản cũ cắt ngang WAV sau ~150 ms),
+  `ready_at_waits_for_data_at_position` (WAV từ FLAC, tệp gốc; mất mạng → `false` khi hết giờ chờ). Tệp mẫu mới
+  `tests/data/noise44_8s.flac` (8 giây nhiễu, 1,4 MB — đủ nhiều khúc để có «khúc giữa»).
+

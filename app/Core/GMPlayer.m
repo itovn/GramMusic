@@ -21,6 +21,7 @@ static void *kPlayerItem = &kPlayerItem;
 static const NSInteger kMaxFails = 3;
 
 @interface GMPlayer () <AVAudioSessionDelegate>
+- (void)mediaServicesReset:(NSString *)why;
 @end
 
 @implementation GMPlayer {
@@ -49,6 +50,19 @@ static const NSInteger kMaxFails = 3;
     NSString *_artworkKey;
     BOOL _interrupted;
     long long _readyT0;  // lúc tạo item (đo thời gian tới khi sẵn sàng)
+    // Không hỏi thẳng AVPlayerItem.duration / currentTime (M22): iOS 6 hỏi qua mediaserverd và chờ trả lời — mediaserverd đang kẹt
+    // chờ dữ liệu (mạng chậm) thì luồng chính đứng 10 giây rồi iOS giết mediaserverd, mất tiếng
+    double _curDur, _nextDur;  // độ dài bài (giây) đọc từ AVURLAsset lúc nạp
+    double _obsPos;            // vị trí trình phát báo lần cuối (giây)
+    long long _obsAt;          // lúc nhận vị trí đó (ms; 0 = chưa có)
+    float _rate;               // tốc độ phát, cập nhật khi trình phát báo đổi
+    long long _resetAt;        // lần dựng lại trình phát gần nhất sau khi mediaserverd khởi động lại
+    long long _resetWindow;    // đầu khoảng 2 phút đếm số lần dựng lại
+    NSInteger _resetCount;
+    // Tua chờ dữ liệu (M22): chỉ ra lệnh tua cho AVPlayer khi lõi đã có dữ liệu ở đó
+    NSInteger _seekGen;
+    double _seekTo;            // vị trí đang chờ (-1 = không)
+    BOOL _seekHold;            // mở bài ở giữa bài: chưa cho phát tới khi tua xong (khỏi phát đoạn đầu bài)
 }
 
 + (instancetype)shared {
@@ -66,6 +80,7 @@ static const NSInteger kMaxFails = 3;
         _nextIndex = -1;
         _index = -1;
         _bg = UIBackgroundTaskInvalid;
+        _seekTo = -1;
     }
     return self;
 }
@@ -84,23 +99,98 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
     }
 }
 
+/// mediaserverd (dịch vụ âm thanh của iOS) chết / khởi động lại — iOS 5 và 6 (thông báo AVAudioSessionMediaServicesWereReset chỉ
+/// có từ iOS 6).
+static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, const void *data) {
+    if (prop != kAudioSessionProperty_ServerDied) return;
+    dispatch_async(dispatch_get_main_queue(), ^{ [[GMPlayer shared] mediaServicesReset:@"ServerDied"]; });
+}
+
 - (void)setup {
     AVAudioSession *s = [AVAudioSession sharedInstance];
     [s setCategory:AVAudioSessionCategoryPlayback error:NULL];
     s.delegate = self;  // ngắt (cuộc gọi đến) — iOS 5 chỉ có cách này (thông báo AVAudioSessionInterruption có từ iOS 6)
     AudioSessionInitialize(NULL, NULL, NULL, NULL);
     AudioSessionAddPropertyListener(kAudioSessionProperty_AudioRouteChange, GMRouteChanged, NULL);
-    _player = [[AVQueuePlayer alloc] init];
-    _player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
-    [_player addObserver:self forKeyPath:@"rate" options:0 context:kPlayerRate];
-    [_player addObserver:self forKeyPath:@"currentItem" options:0 context:kPlayerItem];
+    AudioSessionAddPropertyListener(kAudioSessionProperty_ServerDied, GMServerDied, NULL);
+    [self makePlayer];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(itemEnded:)
                                                  name:AVPlayerItemDidPlayToEndTimeNotification object:nil];
-    __weak GMPlayer *me = self;
-    _timeObs = [_player addPeriodicTimeObserverForInterval:CMTimeMake(1, 1) queue:dispatch_get_main_queue() usingBlock:^(CMTime t) {
-        [me tick];
-    }];
     [self restoreState];
+}
+
+- (void)makePlayer {
+    _player = [[AVQueuePlayer alloc] init];
+    _player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
+    _rate = 0;
+    [_player addObserver:self forKeyPath:@"rate" options:0 context:kPlayerRate];
+    [_player addObserver:self forKeyPath:@"currentItem" options:0 context:kPlayerItem];
+    __weak GMPlayer *me = self;
+    // Gọi cả khi tua / bắt đầu / dừng phát — nguồn vị trí duy nhất (không hỏi currentTime)
+    _timeObs = [_player addPeriodicTimeObserverForInterval:CMTimeMake(1, 1) queue:dispatch_get_main_queue() usingBlock:^(CMTime t) {
+        [me timeObserved:t];
+    }];
+}
+
+/// Bỏ trình phát cũ (mediaserverd đã khởi động lại — trình phát cũ không dùng được nữa). Không gọi gì sang mediaserverd.
+- (void)dropPlayer {
+    if (!_player) return;
+    if (_timeObs) [_player removeTimeObserver:_timeObs];
+    _timeObs = nil;
+    [_player removeObserver:self forKeyPath:@"rate" context:kPlayerRate];
+    [_player removeObserver:self forKeyPath:@"currentItem" context:kPlayerItem];
+    for (AVPlayerItem *item in [_observed allObjects]) [self unwatch:item];
+    _curItem = _nextItem = nil;
+    _curKey = _nextKey = nil;
+    _nextIndex = -1;
+    _curDur = _nextDur = 0;
+    _rate = 0;
+    [self cancelSeek];
+    _player = nil;
+}
+
+/// mediaserverd khởi động lại (bị iOS giết vì treo, hoặc tự chết): mọi item báo lỗi -11819 và trình phát cũ hỏng — dựng lại trình phát,
+/// mở lại đúng bài ở đúng chỗ thay vì coi là bài lỗi rồi nhảy qua cả hàng chờ (17/11: hết nhạc, anh tưởng app tự thoát).
+- (void)mediaServicesReset:(NSString *)why {
+    long long now = GMNowMs();
+    if (now - _resetAt < 5000) return;  // một lần cho mỗi lần khởi động lại (bài đang phát + bài nạp sẵn + ServerDied cùng báo)
+    _resetAt = now;
+    double at = self.position;
+    BOOL play = _wantPlay;
+    if (now - _resetWindow > 120000) {
+        _resetWindow = now;
+        _resetCount = 0;
+    }
+    if (++_resetCount > 3 && play) {
+        // Khởi động lại liên tục: thôi tự phát tiếp (khỏi vòng lặp), chờ người dùng bấm phát
+        play = NO;
+        _wantPlay = NO;
+        [self say:@"Dịch vụ âm thanh của iOS khởi động lại nhiều lần (mạng quá chậm?) — đã tạm dừng. Bấm phát để nghe tiếp."];
+    }
+    GMLog(@"phát: dịch vụ âm thanh của iOS khởi động lại (%@) — dựng lại trình phát, %@ ở %.0f giây", why, play ? @"phát tiếp" : @"giữ",
+          at);
+    [self dropPlayer];
+    _resumeAt = at;  // vị trí hiện đúng trong lúc chờ dựng lại
+    // Chờ mediaserverd lên lại rồi mới tạo trình phát mới
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        AVAudioSession *s = [AVAudioSession sharedInstance];
+        [s setCategory:AVAudioSessionCategoryPlayback error:NULL];
+        AudioSessionRemovePropertyListenerWithUserData(kAudioSessionProperty_AudioRouteChange, GMRouteChanged, NULL);
+        AudioSessionAddPropertyListener(kAudioSessionProperty_AudioRouteChange, GMRouteChanged, NULL);
+        [self makePlayer];
+        if (play) [self holdBackground];
+        if ([self currentKey]) [self loadCurrent:play at:at];
+        else [self notify];
+    });
+}
+
+- (void)timeObserved:(CMTime)t {
+    double s = CMTimeGetSeconds(t);
+    if (_seekTo < 0 && s == s && s >= 0) {
+        _obsPos = s;
+        _obsAt = GMNowMs();
+    }
+    [self tick];
 }
 
 - (void)beginInterruption {
@@ -153,23 +243,21 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
 
 - (BOOL)buffering {
     if (!_wantPlay || !_curItem) return _wantPlay && !_curItem && [self currentKey] != nil;
-    return _curItem.status != AVPlayerItemStatusReadyToPlay || (_player.rate == 0 && !_interrupted);
+    return _curItem.status != AVPlayerItemStatusReadyToPlay || _seekTo >= 0 || (_rate == 0 && !_interrupted);
 }
 
+/// Vị trí trình phát báo lần cuối (mỗi giây / khi tua / phát / dừng), cộng thời gian trôi tới giờ khi đang chạy (tối đa 1 giây).
 - (double)position {
     if (!_curItem) return _resumeAt;
-    double t = CMTimeGetSeconds(_player.currentTime);
-    return t == t ? t : 0;
+    if (_seekTo >= 0) return _seekTo;
+    double t = _obsPos;
+    if (_rate > 0 && _obsAt) t += MIN(1.0, (GMNowMs() - _obsAt) / 1000.0) * _rate;
+    if (_curDur > 0 && t > _curDur) t = _curDur;
+    return t == t ? MAX(0, t) : 0;
 }
 
 - (double)duration {
-    if (_curItem) {
-        CMTime d = _curItem.duration;
-        if (CMTIME_IS_NUMERIC(d)) {
-            double s = CMTimeGetSeconds(d);
-            if (s > 0) return s;
-        }
-    }
+    if (_curItem && _curDur > 0) return _curDur;
     return [[self.current objectForKey:@"dur"] doubleValue];
 }
 
@@ -242,6 +330,7 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
     _nextItem = nil;
     _nextKey = nil;
     _nextIndex = -1;
+    _nextDur = 0;
 }
 
 - (void)dropCurrent {
@@ -250,15 +339,24 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
     [self unwatch:_curItem];
     _curItem = nil;
     _curKey = nil;
+    _curDur = 0;
+    [self cancelSeek];
 }
 
 /// Tạo AVPlayerItem không chặn luồng chính. `playerItemWithURL:` đọc thử tệp ngay trên luồng gọi — WAV giải từ FLAC: AVPlayer đọc
 /// cả cuối tệp, lõi phải tải + giải phần cuối bài (đo 17/11: luồng chính đứng 7,6 giây). AVURLAsset nạp ở luồng nền, xong mới tạo item.
-- (void)itemFor:(NSURL *)url done:(void (^)(AVPlayerItem *item))done {
+/// `dur`: độ dài bài (giây, 0 = chưa biết) đọc từ asset đã nạp — giữ lại, không hỏi AVPlayerItem.duration (M22).
+- (void)itemFor:(NSURL *)url done:(void (^)(AVPlayerItem *item, double dur))done {
     AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
     [asset loadValuesAsynchronouslyForKeys:@[@"playable", @"duration", @"tracks"] completionHandler:^{
+        double dur = 0;
+        if ([asset statusOfValueForKey:@"duration" error:NULL] == AVKeyValueStatusLoaded) {
+            CMTime d = asset.duration;
+            if (CMTIME_IS_NUMERIC(d)) dur = CMTimeGetSeconds(d);
+        }
+        if (!(dur > 0)) dur = 0;
         dispatch_async(dispatch_get_main_queue(), ^{
-            done([AVPlayerItem playerItemWithAsset:asset]);
+            done([AVPlayerItem playerItemWithAsset:asset], dur);
         });
     }];
 }
@@ -321,11 +419,14 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
         long long tu = GMNowMs();
         NSURL *url = [ok objectForKey:@"nsurl"] ?: [NSURL URLWithString:[ok objectForKey:@"url"]];
         double cached = [[ok objectForKey:@"cached"] doubleValue];
-        [self itemFor:url done:^(AVPlayerItem *item) {
+        [self itemFor:url done:^(AVPlayerItem *item, double dur) {
             if (gen != _gen) return;
             long long ti = GMNowMs();
             _curItem = item;
             _curKey = key;
+            _curDur = dur;
+            _obsPos = at;
+            _obsAt = 0;
             [self watch:item];
             [_player insertItem:item afterItem:nil];
             if (_wantPlay) [_player play];
@@ -417,10 +518,11 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
             _nextIndex = -1;
             return;
         }
-        [self itemFor:[ok objectForKey:@"nsurl"] ?: [NSURL URLWithString:[ok objectForKey:@"url"]] done:^(AVPlayerItem *item) {
+        [self itemFor:[ok objectForKey:@"nsurl"] ?: [NSURL URLWithString:[ok objectForKey:@"url"]] done:^(AVPlayerItem *item, double dur) {
             if (gen != _gen || ![_nextKey isEqual:key] || _nextItem) return;
             if (![_player canInsertItem:item afterItem:_curItem]) return;
             _nextItem = item;
+            _nextDur = dur;
             [self watch:item];
             [_player insertItem:item afterItem:_curItem];
             GMLog(@"phát: đã nạp sẵn bài kế");
@@ -431,6 +533,17 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
 - (void)observeValueForKeyPath:(NSString *)path ofObject:(id)obj change:(NSDictionary *)change context:(void *)ctx {
     if (ctx == kItemStatus) {
         AVPlayerItem *item = obj;
+        if (item.status == AVPlayerItemStatusFailed && item.error.code == -11819 /* AVErrorMediaServicesWereReset */ &&
+            (item == _curItem || item == _nextItem)) {
+            // mediaserverd khởi động lại: không phải bài hỏng
+            GMLog(@"phát: item lỗi -11819 (dịch vụ âm thanh của iOS khởi động lại)");
+            if (![NSThread isMainThread]) {
+                dispatch_async(dispatch_get_main_queue(), ^{ [self mediaServicesReset:@"-11819"]; });
+            } else {
+                [self mediaServicesReset:@"-11819"];
+            }
+            return;
+        }
         if (item == _nextItem && item.status == AVPlayerItemStatusFailed) {
             // Bài nạp sẵn hỏng: bỏ khỏi hàng — hết bài hiện tại thì itemEnded mở bài kế theo cách thường
             GMLog(@"phát: bài nạp sẵn lỗi %@", item.error);
@@ -443,10 +556,13 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
             _readyT0 = 0;
             _fails = 0;
             if (_resumeAt > 1) {
-                [_player seekToTime:CMTimeMakeWithSeconds(_resumeAt, 1000)];
+                // Mở ở giữa bài (Nghe tiếp, dựng lại trình phát): tua khi có dữ liệu ở đó rồi mới phát
+                double t = _resumeAt;
                 _resumeAt = 0;
+                [self seekWhenReady:t hold:YES];
+            } else if (_wantPlay) {
+                [_player play];
             }
-            if (_wantPlay) [_player play];
             [self endBackgroundTask];
             [self preloadNext];
             [self updateNowPlaying];
@@ -458,9 +574,11 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
     } else if (ctx == kItemKeepUp) {
         AVPlayerItem *item = obj;
         // Hết chờ dữ liệu (mạng chậm, vừa tua): phát tiếp nếu người dùng vẫn muốn phát
-        if (item == _curItem && item.playbackLikelyToKeepUp && _wantPlay && _player.rate == 0 && !_interrupted) [_player play];
+        if (item == _curItem && item.playbackLikelyToKeepUp && _wantPlay && _rate == 0 && !_interrupted && !_seekHold) [_player play];
         [self notify];
     } else if (ctx == kPlayerRate) {
+        // Đọc ngay lúc trình phát báo đổi; chỗ khác dùng bản giữ lại
+        _rate = _player.rate;
         [self updateNowPlaying];
         [self notify];
     } else if (ctx == kPlayerItem) {
@@ -479,7 +597,7 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
     AVPlayerItem *now = _player.currentItem;
     if (now == _curItem) return;
     if (!now && _curItem && _wantPlay && !_ended && !_nextItem && _curItem.status == AVPlayerItemStatusReadyToPlay &&
-        CMTimeCompare(_curItem.currentTime, _curItem.duration) >= 0) {
+        (_curDur <= 0 || self.position >= _curDur - 1.5)) {
         // Hết bài mà không có bài nạp sẵn (thông báo hết bài có thể tới sau): mở bài kế như itemEnded
         [self advanceAfterEnd];
         return;
@@ -489,9 +607,14 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
         _curItem = _nextItem;
         _curKey = _nextKey;
         _index = _nextIndex;
+        _curDur = _nextDur;
+        _obsPos = 0;
+        _obsAt = 0;
+        [self cancelSeek];
         _nextItem = nil;
         _nextKey = nil;
         _nextIndex = -1;
+        _nextDur = 0;
         _resumeAt = 0;
         _gen++;
         if (![_curKey hasPrefix:@"ipod:"] && ![_curKey hasPrefix:@"file:"]) [GMCore call:@"play.played" args:@{@"key": _curKey} done:nil];
@@ -616,7 +739,7 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
         return;
     }
     _wantPlay = YES;
-    [_player play];
+    if (!_seekHold) [_player play];  // đang chờ tua (mở giữa bài): tua xong tự phát
     [self reportPace];
     [self updateNowPlaying];
     [self notify];
@@ -659,10 +782,60 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
         _resumeAt = t;
         return;
     }
-    [_player seekToTime:CMTimeMakeWithSeconds(MAX(0, t), 1000)];
-    [self reportKey:_curKey pos:t playing:_wantPlay];
+    [self seekWhenReady:MAX(0, t) hold:_seekHold];
+}
+
+- (void)cancelSeek {
+    _seekGen++;
+    _seekTo = -1;
+    _seekHold = NO;
+}
+
+/// Tua tới `t` khi lõi đã có dữ liệu ở đó (M22): tua tới chỗ chưa có dữ liệu thì mediaserverd chặn lúc mở đoạn đọc mới tới khi có —
+/// mạng chậm quá 10 giây là iOS giết nó (mất tiếng). Trong lúc chờ: vị trí hiện chỗ mới, nhịp nghe dời tới đó (lõi tải / giải ở đó
+/// trước), tiếng vẫn chạy ở chỗ cũ. `hold`: chưa cho phát tới khi tua xong (mở bài ở giữa bài).
+- (void)seekWhenReady:(double)t hold:(BOOL)hold {
+    NSInteger sg = ++_seekGen;
+    AVPlayerItem *item = _curItem;
+    NSString *key = _curKey;
+    _seekTo = t;
+    _seekHold = hold;
+    [self reportKey:key pos:t playing:_wantPlay];
     [self updateNowPlaying];
     [self notify];
+    long long t0 = GMNowMs();
+    void (^go)(void) = ^{
+        if (sg != _seekGen || item != _curItem) return;
+        _seekTo = -1;
+        _seekHold = NO;
+        [_player seekToTime:CMTimeMakeWithSeconds(t, 1000)];
+        _obsPos = t;
+        _obsAt = 0;
+        if (_wantPlay) [_player play];
+        if (GMNowMs() - t0 > 1500) GMLog(@"phát: có dữ liệu ở %.0f giây sau %lld ms — tua", t, GMNowMs() - t0);
+        [self reportPace];
+        [self updateNowPlaying];
+        [self notify];
+    };
+    if (!key || [GMLocalMusic isIPodKey:key]) {
+        go();  // bài app Nhạc: tệp trên máy
+        return;
+    }
+    [self waitData:key at:t gen:sg then:go];
+}
+
+/// Hỏi lõi tới khi có dữ liệu ở giây `t` (mỗi lần chờ tối đa 20 giây; lỗi hẳn thì tua luôn — AVPlayer tự báo lỗi).
+- (void)waitData:(NSString *)key at:(double)t gen:(NSInteger)sg then:(void (^)(void))go {
+    [GMCore call:@"play.ready" args:@{@"key": key, @"pos": @(t), @"wait": @20} done:^(id ok, NSDictionary *err) {
+        if (sg != _seekGen) return;
+        if (!err && ![[ok objectForKey:@"ready"] boolValue]) {
+            GMLog(@"phát: chưa có dữ liệu ở %.0f giây (mạng chậm) — chờ tiếp", t);
+            [self waitData:key at:t gen:sg then:go];
+            return;
+        }
+        if (err) GMLog(@"phát: play.ready lỗi %@ — tua luôn", [err objectForKey:@"code"]);
+        go();
+    }];
 }
 
 - (void)jumpTo:(NSInteger)i {
@@ -829,7 +1002,7 @@ static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, 
     if (line3.length) [d setObject:line3 forKey:MPMediaItemPropertyAlbumTitle];
     [d setObject:@(dur) forKey:MPMediaItemPropertyPlaybackDuration];
     [d setObject:@(pos) forKey:MPNowPlayingInfoPropertyElapsedPlaybackTime];
-    [d setObject:@(_player.rate) forKey:MPNowPlayingInfoPropertyPlaybackRate];
+    [d setObject:@(_rate) forKey:MPNowPlayingInfoPropertyPlaybackRate];
     NSString *key = [s objectForKey:@"key"];
     BOOL fetch = NO;
     if (_artwork && [_artworkKey isEqual:key]) {

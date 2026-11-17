@@ -1549,6 +1549,25 @@ impl Core {
                 self.streams.set_pace(inner.as_deref().unwrap_or(key), pos, playing);
                 Ok(json!({}))
             }
+            "play.ready" => {
+                // Dữ liệu quanh giây `pos` đã có chưa — chờ tối đa `wait` giây (mặc định 20); `ready: false` = chưa, hỏi lại. App
+                // chỉ ra lệnh tua cho AVPlayer khi có (M22)
+                let pos = a.get("pos").and_then(Value::as_f64).unwrap_or(0.0);
+                let wait = a.get("wait").and_then(Value::as_f64).unwrap_or(20.0).clamp(1.0, 120.0);
+                let song = match Self::local_arg(a) {
+                    Some(r) => {
+                        let (path, song) = r?;
+                        if !crate::decode::needs_decode(&song.ext) {
+                            return Ok(json!({"ready": true})); // tệp trên máy AVPlayer đọc thẳng
+                        }
+                        self.streams.add_local(song.clone(), path.into());
+                        song
+                    }
+                    None => self.song_arg(a)?,
+                };
+                let ready = self.streams.ready_at(&song, pos, Duration::from_secs_f64(wait)).await?;
+                Ok(json!({"ready": ready}))
+            }
             "play.info" => {
                 // Thông số tệp (định dạng, tần số, bit, bitrate, cỡ) — đọc phần đầu tệp đã có; chưa có thì chỉ định dạng + cỡ
                 if let Some(r) = Self::local_arg(a) {

@@ -133,6 +133,13 @@
   `symcheck` 340 ký hiệu, thiếu 0 trên iOS 5.1.1 (iPad 1).
 - Cùng sửa nguồn Cydia + `control` của Côn Bằng TV Legacy, TubeMini, Roza, GramMini.
 
+## 17/11/2026 — mất tiếng khi mạng chập chờn (M22)
+
+- Anh báo «đang nghe thì app tự thoát» — thật ra mediaserverd bị iOS giết (chờ quá 10 giây), app coi là bài lỗi rồi dừng. Sửa ở lõi
+  (giữ kết nối khi tải lỗi tạm thời, `play.ready`) và app (tua khi có dữ liệu, không hỏi thuộc tính AVPlayerItem mỗi lần, dựng lại
+  trình phát khi mediaserverd khởi động lại). Thử trên iPhone 5: hết bị giết; giết tay mediaserverd → 3 giây sau phát tiếp đúng chỗ.
+  Lõi 38 test, gm-net 27 test.
+
 ### Còn lại
 
 - [ ] Ảnh màn hình khoá có khung GramLockControl cho trang giới thiệu (cần anh bấm nút nguồn).

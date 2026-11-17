@@ -51,6 +51,7 @@ void gm_call(const char *request_json, gm_cb on_result, void *ctx);
 | `sync.state` | — | như sự kiện `sync.state` |
 | `play.url` | `key` | `{url, cached}` — URL cổng phát nội bộ (FLAC / OGG / Opus: đuôi `.wav` — lõi giải mã); khoá `file:` → `file://…` (định dạng AVPlayer đọc được) hoặc URL cổng phát (FLAC / OGG / Opus giải từ tệp trên máy); lỗi `FORMAT` (chưa phát được), `NO_SONG` |
 | `play.pos` | `key`, `pos` (giây), `playing` | `{}` — nhịp nghe: lõi chỉ tải tới `ahead_secs` giây trước vị trí này (M10, M12) |
+| `play.ready` | `key`, `pos` (giây), `wait` (giây, mặc định 20) | `{ready}` — chờ tới khi dữ liệu quanh `pos` đã giải / đã tải (`false`: hết giờ, hỏi lại). App chỉ tua AVPlayer khi có (M22) |
 | `play.info` | `key` | `{format, rate, bits, channels, kbps, vbr, lossless, hires, size, ready}` — thông số tệp từ phần đầu tệp đã có (`ready` false: chưa có khúc đầu) |
 | `play.prefetch` | `key` | `{}` — tải trước 2 khúc đầu |
 | `play.played` | `key` | `{}` — ghi vào «Nghe gần đây» |

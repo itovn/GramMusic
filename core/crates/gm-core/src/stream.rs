@@ -59,6 +59,16 @@ pub fn raw_bps(song: &Song) -> f64 {
     if song.dur > 0 { song.size as f64 / song.dur as f64 } else { 64_000.0 }
 }
 
+/// Lỗi tải tạm thời (mạng chậm / mất, Telegram bắt chờ): đáng chờ rồi thử lại thay vì bỏ.
+fn transient_code(code: &str) -> bool {
+    matches!(code, "NETWORK" | "TIMEOUT" | "FLOOD_WAIT")
+}
+
+/// Như `transient_code` cho lỗi của luồng giải (chuỗi, mang mã lỗi tải gốc — vd. «đọc tệp lỗi: TIMEOUT: …»).
+fn transient_msg(msg: &str) -> bool {
+    msg.contains("NETWORK") || msg.contains("TIMEOUT") || msg.contains("FLOOD_WAIT") || msg.contains("quá lâu")
+}
+
 pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Lỗi lấy dữ liệu: `retry` = đáng thử lại (mạng, FLOOD_WAIT…), kèm thời gian chờ gợi ý.
@@ -500,6 +510,64 @@ impl Streams {
         Ok(())
     }
 
+    /// Chờ tới khi dữ liệu quanh giây `pos` của bài đã có (WAV giải sẵn / khúc tệp gốc đã tải), tối đa `max`. `Ok(false)` = chưa có
+    /// (hết giờ — hỏi lại). App chỉ ra lệnh tua cho AVPlayer khi có: tua tới chỗ chưa có dữ liệu thì mediaserverd chặn lúc mở đoạn đọc
+    /// mới tới khi có, mạng chậm quá 10 giây là iOS giết nó (M22).
+    pub async fn ready_at(self: &Arc<Self>, song: &Song, pos: f64, max: Duration) -> io::Result<bool> {
+        let deadline = Instant::now() + max;
+        let pos = if pos.is_finite() { pos.max(0.0) } else { 0.0 };
+        if decode::needs_decode(&song.ext) {
+            let pcm = match tokio::time::timeout(max, self.pcm(song)).await {
+                Ok(p) => p?,
+                Err(_) => return Ok(false),
+            };
+            let off = decode::HEADER + (pos * pcm.bytes_per_sec()) as u64;
+            let b0 = (off.min(pcm.size.saturating_sub(1)) / BLOCK) as u32;
+            let me = Arc::clone(self);
+            let pk = Arc::clone(&pcm);
+            let kick = move || me.kick(&pk);
+            // Khúc chứa vị trí + khúc sau (≈ 1,5 giây WAV mỗi khúc): tua xong phát được ngay
+            for b in b0..=(b0 + 1).min(pcm.blocks() - 1) {
+                loop {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Ok(false);
+                    }
+                    match tokio::time::timeout(left, pcm.wait_block(b, &kick)).await {
+                        Err(_) => return Ok(false),
+                        Ok(Ok(())) => break,
+                        Ok(Err(e)) if transient_msg(&e) => tokio::time::sleep(Duration::from_secs(2).min(left)).await,
+                        Ok(Err(e)) => return Err(io::Error::other(e)),
+                    }
+                }
+            }
+            return Ok(true);
+        }
+        if song.size == 0 || self.complete_path(song).is_some() {
+            return Ok(true);
+        }
+        let t = self.track(song)?;
+        let n = song.size.div_ceil(BLOCK) as u32;
+        // Tệp gốc (mp3 / m4a…): AVPlayer tự đổi giây ra byte — ước theo bitrate trung bình, lấy cả khúc trước / sau cho chắc
+        let b = ((pos * raw_bps(song)) as u64).min(song.size - 1) / BLOCK;
+        let b = b as u32;
+        for b in b.saturating_sub(1)..=(b + 1).min(n - 1) {
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Ok(false);
+                }
+                match tokio::time::timeout(left, self.wait_block(&t, b)).await {
+                    Err(_) => return Ok(false),
+                    Ok(Ok(())) => break,
+                    Ok(Err(e)) if transient_code(&e.code) => tokio::time::sleep(Duration::from_secs(2).min(left)).await,
+                    Ok(Err(e)) => return Err(io::Error::other(format!("{}: {}", e.code, e.msg))),
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Chạy thêm lượt tải cho bài nếu còn khúc cần và chưa đủ lượt.
     fn pump(self: &Arc<Self>, t: &Arc<Track>) {
         let limit = self.limit(&t.song.key(), t.song.size, 0, raw_bps(&t.song));
@@ -745,9 +813,21 @@ impl Streams {
             .and_then(|k| self.find_song(k));
         let Some(song) = song else { return respond(&mut s, "404 Not Found", &[], b"").await };
         let pcm = if req.path.ends_with(".wav") && decode::needs_decode(&song.ext) {
-            match self.pcm(&song).await {
-                Ok(p) => Some(p),
-                Err(_) => return respond(&mut s, "500 Internal Server Error", &[], b"").await,
+            // Mở hỏng có thể chỉ vì một lượt tải khúc khác hỏng cùng lúc (lỗi chung của bài) — thử lại vài lần trước khi báo lỗi
+            let mut tries = 0;
+            loop {
+                match self.pcm(&song).await {
+                    Ok(p) => break Some(p),
+                    Err(e) if tries < 3 => {
+                        tries += 1;
+                        crate::dlog(&format!("phát: {} mở WAV lỗi (lần {tries}): {e} — thử lại", song.key()));
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                            _ = closed(&s) => return Ok(()),
+                        }
+                    }
+                    Err(_) => return respond(&mut s, "500 Internal Server Error", &[], b"").await,
+                }
             }
         } else {
             None
@@ -797,6 +877,7 @@ impl Streams {
             let kick = move || me.kick(&pk);
             let mut pos = start;
             let (wkey, wbps) = (song.key(), pcm.bytes_per_sec());
+            let mut waiting = false;
             while pos <= end {
                 let b = (pos / BLOCK) as u32;
                 // Nhịp nghe: chưa tới thì chờ (tạm dừng → đứng yên), vẫn theo dõi trình phát ngắt kết nối
@@ -812,8 +893,25 @@ impl Streams {
                     _ = closed(&s) => return Ok(()), // trình phát đã ngắt (chuyển bài, tua) — thôi chờ
                 };
                 if let Err(e) = r {
+                    if transient_msg(&e) {
+                        // Mạng chậm / mất: giữ kết nối, chờ rồi giải tiếp. Đóng thì AVPlayer phải mở lại đoạn đọc — lúc mở,
+                        // mediaserverd chặn tới khi có dữ liệu, quá 10 giây iOS giết nó (mất tiếng — M22)
+                        if !waiting {
+                            crate::dlog(&format!("phát: {} khúc WAV {b}: {e} — giữ kết nối, chờ mạng", song.key()));
+                            waiting = true;
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                            _ = closed(&s) => return Ok(()),
+                        }
+                        continue;
+                    }
                     crate::dlog(&format!("phát: {} khúc WAV {b}: {e}", song.key()));
                     return Ok(());
+                }
+                if waiting {
+                    crate::dlog(&format!("phát: {} khúc WAV {b}: có lại dữ liệu", song.key()));
+                    waiting = false;
                 }
                 let block_end = ((b as u64 + 1) * BLOCK).min(size) - 1;
                 let upto = block_end.min(end);
@@ -845,6 +943,7 @@ impl Streams {
         let _guard = Reader(Arc::clone(&t));
         let mut pos = start;
         let (rkey, rbps) = (song.key(), raw_bps(&song));
+        let mut waiting = false;
         while pos <= end {
             let b = (pos / BLOCK) as u32;
             // Nhịp nghe: chưa tới thì chờ (tạm dừng → đứng yên), vẫn theo dõi trình phát ngắt kết nối
@@ -860,8 +959,24 @@ impl Streams {
                 _ = closed(&s) => return Ok(()), // trình phát đã ngắt (chuyển bài, tua) — thôi chờ
             };
             if let Err(e) = r {
+                if transient_code(&e.code) {
+                    // Như WAV ở trên: giữ kết nối, chờ mạng rồi tải tiếp (M22)
+                    if !waiting {
+                        crate::dlog(&format!("phát: {} khúc {b}: {} {} — giữ kết nối, chờ mạng", song.key(), e.code, e.msg));
+                        waiting = true;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                        _ = closed(&s) => return Ok(()),
+                    }
+                    continue;
+                }
                 crate::dlog(&format!("phát: {} khúc {b}: {} {}", song.key(), e.code, e.msg));
-                return Ok(()); // đóng kết nối: AVPlayer báo lỗi / hỏi lại
+                return Ok(()); // lỗi hẳn: đóng kết nối — AVPlayer báo lỗi
+            }
+            if waiting {
+                crate::dlog(&format!("phát: {} khúc {b}: có lại dữ liệu", song.key()));
+                waiting = false;
             }
             let block_end = ((b as u64 + 1) * BLOCK).min(size) - 1;
             let upto = block_end.min(end);
@@ -1028,6 +1143,14 @@ mod tests {
         data: Vec<u8>,
         calls: AtomicUsize,
         fail_first: AtomicUsize,
+        /// «Mất mạng» với khúc bắt đầu trong [down_from, down_to): lỗi TIMEOUT không gợi ý thử lại (tới tận luồng giải / trình
+        /// phát); down_from = u64::MAX = có mạng
+        down_from: std::sync::atomic::AtomicU64,
+        down_to: std::sync::atomic::AtomicU64,
+    }
+
+    fn net_up() -> std::sync::atomic::AtomicU64 {
+        std::sync::atomic::AtomicU64::new(u64::MAX)
     }
 
     impl Fetch for Fake {
@@ -1036,6 +1159,9 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 // Trừ một lần lỗi giả chỉ khi còn (hai lượt tải song song không được cùng trừ — trước đây tràn số → lỗi mãi)
+                if offset >= self.down_from.load(Ordering::SeqCst) && offset < self.down_to.load(Ordering::SeqCst) {
+                    return Err(FetchError { code: "TIMEOUT".into(), msg: "thử".into(), retry: None });
+                }
                 if self.fail_first.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
                     return Err(FetchError { code: "NETWORK".into(), msg: "thử".into(), retry: Some(Duration::from_millis(20)) });
                 }
@@ -1050,7 +1176,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gmu-stream-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let data: Vec<u8> = (0..size).map(|i| (i * 7 % 251) as u8).collect();
-        let fake = Arc::new(Fake { data, calls: AtomicUsize::new(0), fail_first: AtomicUsize::new(fail_first) });
+        let fake = Arc::new(Fake { data, calls: AtomicUsize::new(0), fail_first: AtomicUsize::new(fail_first), down_from: net_up(), down_to: net_up() });
         let song = Song { peer: "-1001".into(), id: 42, title: "t".into(), size: size as u64, ext: "mp3".into(), ..Default::default() };
         let s2 = song.clone();
         let events: Emit = Arc::new(|_| {});
@@ -1120,7 +1246,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("gmu-dec-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let data = std::fs::read(format!("{}/tests/data/{file}", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        let fake = Arc::new(Fake { data, calls: AtomicUsize::new(0), fail_first: AtomicUsize::new(0) });
+        let fake = Arc::new(Fake { data, calls: AtomicUsize::new(0), fail_first: AtomicUsize::new(0), down_from: net_up(), down_to: net_up() });
         let song = Song { peer: "-1002".into(), id: 7, title: "t".into(), size: fake.data.len() as u64, ext: ext.into(), dur,
                           ..Default::default() };
         let s2 = song.clone();
@@ -1336,7 +1462,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
         drop(st);
-        let fake2 = Arc::new(Fake { data: fake.data.clone(), calls: AtomicUsize::new(0), fail_first: AtomicUsize::new(0) });
+        let fake2 =
+            Arc::new(Fake { data: fake.data.clone(), calls: AtomicUsize::new(0), fail_first: AtomicUsize::new(0), down_from: net_up(), down_to: net_up() });
         let s2 = song.clone();
         let st = Streams::new(dir.join("music"), fake2.clone(), Arc::new(|_| {}), Box::new(move |k| (k == s2.key()).then(|| s2.clone())));
         assert!((st.cached_fraction(&song) - 1.0 / 3.0).abs() < 1e-9);
@@ -1349,6 +1476,75 @@ mod tests {
         }
         assert_eq!(std::fs::read(st.complete_path(&song).unwrap()).unwrap(), fake.data);
         assert_eq!(fake2.calls.load(Ordering::SeqCst), 2); // chỉ tải 2 khúc còn thiếu
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Mạng chập chờn giữa bài (lỗi tải tới tận luồng giải): cổng phát giữ kết nối, chờ rồi giải tiếp — trả đủ WAV, không cắt
+    /// ngang (cắt thì AVPlayer phải mở lại đoạn đọc → mediaserverd chặn → iOS giết nó — M22).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn transient_errors_keep_connection_open() {
+        let (st, fake, song, dir) = setup_file("keep", "noise44_8s.flac", "flac", 8);
+        let url = st.url(&song).await.unwrap();
+        let size = 44 + 8 * 176_400usize;
+        assert!(fake.data.len() as u64 > 5 * BLOCK, "tệp mẫu phải dài hơn 5 khúc");
+        // Khúc đầu + cuối (mở WAV) tải được; các khúc giữa «mất mạng» 1,5 giây
+        fake.down_to.store(4 * BLOCK, Ordering::SeqCst);
+        fake.down_from.store(BLOCK, Ordering::SeqCst);
+        // Mở WAV (chỉ cần khúc đầu + cuối; lượt tải khúc giữa hỏng song song có thể làm lần mở đầu hỏng — thử lại)
+        for i in 0.. {
+            match st.pcm(&song).await {
+                Ok(_) => break,
+                Err(e) if i < 50 => {
+                    let _ = e;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("không mở được WAV: {e}"),
+            }
+        }
+        let f2 = Arc::clone(&fake);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            f2.down_from.store(u64::MAX, Ordering::SeqCst); // mạng có lại
+        });
+        let t0 = Instant::now();
+        let (h, full) = get(&url, None).await;
+        assert!(h.starts_with("HTTP/1.1 200"), "{h} — sau {} ms", t0.elapsed().as_millis());
+        assert_eq!(full.len(), size, "WAV bị cắt ngang sau {} ms", t0.elapsed().as_millis());
+        assert_eq!(wav_fmt(&full), (2, 44_100, 16, 8 * 176_400));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `ready_at`: chờ dữ liệu ở giữa bài (WAV giải từ FLAC, tệp gốc mp3); mạng mất thì trả «chưa» khi hết giờ chờ.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ready_at_waits_for_data_at_position() {
+        let (st, _f, song, dir) = setup_file("ready", "noise44.flac", "flac", 4);
+        st.set_pace(&song.key(), 3.0, false);
+        assert!(st.ready_at(&song, 3.0, Duration::from_secs(10)).await.unwrap());
+        // Đoạn ở giây 3 đã giải: trả ngay, đúng bằng bản giải cả bài
+        let url = st.url(&song).await.unwrap();
+        let a = 44 + 3 * 176_400;
+        let (_, mid) = get(&url, Some(&format!("bytes={a}-{}", a + 9_999))).await;
+        let (_, full) = get(&url, None).await;
+        assert_eq!(mid, full[a..a + 10_000]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Tệp gốc: khúc quanh vị trí (ước theo bitrate) đã tải
+        let size = (BLOCK * 40) as usize;
+        let (st, _f, mut song, dir) = setup("ready-raw", size, 0);
+        song.dur = 400;
+        st.set_pace(&song.key(), 300.0, false);
+        assert!(st.ready_at(&song, 300.0, Duration::from_secs(10)).await.unwrap());
+        let b = (300.0 * size as f64 / 400.0) as u64 / BLOCK;
+        let t = st.track(&song).unwrap();
+        assert!(lock(&t.st).have[b as usize]);
+        let _ = std::fs::remove_dir_all(&dir);
+        // Mạng mất ngay từ đầu → «chưa» khi hết giờ chờ (không treo)
+        let (st, fake, mut song, dir) = setup("ready-off", size, 0);
+        fake.down_from.store(0, Ordering::SeqCst);
+        fake.down_to.store(u64::MAX, Ordering::SeqCst);
+        song.dur = 400;
+        let t0 = Instant::now();
+        assert!(!st.ready_at(&song, 100.0, Duration::from_secs(2)).await.unwrap());
+        assert!(t0.elapsed() < Duration::from_secs(5));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
