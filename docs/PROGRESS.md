@@ -131,7 +131,7 @@
 
 - Dòng mô tả gói trong Cydia viết không dấu (M21) — Cydia trên iOS 5 / 6 hiện chữ có dấu ở dòng này thành «?». App không đổi gì.
   `symcheck` 340 ký hiệu, thiếu 0 trên iOS 5.1.1 (iPad 1).
-- Cùng sửa nguồn Cydia + `control` của Côn Bằng TV Legacy, TubeMini, Roza.
+- Cùng sửa nguồn Cydia + `control` của Côn Bằng TV Legacy, TubeMini, Roza, GramMini.
 
 ### Còn lại
 
