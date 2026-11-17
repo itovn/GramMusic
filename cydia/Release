@@ -1,0 +1,16 @@
+Origin: GramMusic
+Label: GramMusic
+Suite: stable
+Version: 1.0
+Codename: ios6
+Architectures: iphoneos-arm
+Components: main
+Description: GramMusic — nghe nhạc từ Telegram cho iPhone / iPad iOS 5 / iOS 6 đã jailbreak — https://itovn.github.io/GramMusic/
+MD5Sum:
+ 187adbe85fad77c7ffd6e838f813c418 765 Packages
+ 309451fa247e8196d7b5923ecb4a035a 529 Packages.gz
+ 9111ff9e88491cb648fbc884123c4fe0 598 Packages.bz2
+SHA256:
+ d46669107f16e71196193ba9ea1a73d277744118681290185e0968934a0a40d7 765 Packages
+ e6c574c3b8cb4043456a8258e3000a8f2ec671e186596a0a85f516c4f7472dc0 529 Packages.gz
+ b85771fa32f92bc0c142666f06a9af5b7d98deacbbbbd1cc4546b81118236dbd 598 Packages.bz2

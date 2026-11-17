@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>GramMusic</title>
+<!-- Trang mô tả gói trong Cydia (UIWebView iOS 5 / 6): không biến CSS, flex, grid; dải màu có tiền tố -webkit- -->
+<style>
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; padding: 10px 10px 24px; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #1c2a38;
+  background: #cbd2d8 url(../img/stripes.png) repeat; }
+a { color: #2a6fb7; text-decoration: none; }
+.head { position: relative; padding: 4px 0 6px 76px; min-height: 64px; }
+.head img { position: absolute; left: 0; top: 0; width: 64px; height: 64px; }
+.head b { display: block; font-size: 20px; color: #2f3e50; text-shadow: 0 1px 0 #fff; margin-top: 6px; }
+.head span { font-size: 14px; color: #4c566c; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.85); }
+h2 { margin: 18px 10px 6px; font-size: 15px; color: #4c566c; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.85); }
+.group { background: #fff; border: 1px solid #a9b2bc; border-radius: 9px; overflow: hidden;
+  -webkit-box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8); box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8); }
+.row { padding: 10px 12px; border-top: 1px solid #d9dde2; font-size: 14px; line-height: 19px; }
+.row:first-child { border-top: 0; }
+.row b { color: #1c2a38; }
+.shots { text-align: center; font-size: 0; }
+.shots img { display: inline-block; width: 31%; max-width: 120px; margin: 4px 1%; border-radius: 8px; border: 1px solid #8e9aa6; }
+.foot { margin-top: 16px; text-align: center; font-size: 12px; color: #4c566c; line-height: 17px; text-shadow: 0 1px 0 rgba(255, 255, 255, 0.85); }
+</style>
+</head>
+<body>
+<div class="head">
+  <img src="CydiaIcon.png" alt="">
+  <b>GramMusic 1.0.0</b>
+  <span>Nghe nhạc từ Telegram cho iOS 5 / iOS 6 đã jailbreak</span>
+</div>
+
+<h2>Bản 1.0.0</h2>
+<div class="group">
+  <div class="row">Bản đầu tiên: thư viện tự quét nhạc trong Tin nhắn đã lưu, nhóm, kênh; tìm không dấu; playlist, Yêu thích, tải về máy</div>
+  <div class="row"><b>FLAC</b> (cả hi-res), <b>OGG Vorbis</b>, <b>Opus</b> phát được trên iOS 5 / 6 — app tự giải mã, tua ngay</div>
+  <div class="row">Phát ngay cả tệp lớn: tải theo nhịp nghe, tạm dừng thì thôi tải</div>
+  <div class="row"><b>Lời bài hát</b> chạy theo nhạc (LRCLIB, bật trong Cài đặt của app)</div>
+  <div class="row"><b>Màn hình khoá</b> (tweak GramLockControl): lời đang hát, thanh tiến trình, nút điều khiển</div>
+  <div class="row">Nhạc trên máy: app Nhạc và tệp chép vào máy</div>
+  <div class="row">MTProxy (dd, ee fake-TLS), SOCKS5, DNS mã hoá</div>
+</div>
+
+<h2>Lưu ý</h2>
+<div class="group">
+  <div class="row">Cài xong bấm <b>Restart SpringBoard</b> — tweak GramLockControl cho điều khiển và lời bài hát trên màn hình khoá (bật / tắt trong Cài đặt của iPhone → GramLockControl).</div>
+  <div class="row">Máy: iOS 5.0 – 6.1.x (iPhone 4 / 4S / 5, iPad 1 – 4, iPad mini 1, iPod touch 4 / 5).</div>
+  <div class="row">Ứng dụng <b>không chính thức</b>, dùng Telegram API. Mã nguồn mở GPL-3.0: <a href="https://github.com/itovn/GramMusic">github.com/itovn/GramMusic</a></div>
+</div>
+
+<div class="foot">
+  <a href="https://itovn.github.io/GramMusic/">itovn.github.io/GramMusic</a> · Nhóm Telegram <a href="https://t.me/tivikit">t.me/tivikit</a>
+</div>
+</body>
+</html>
