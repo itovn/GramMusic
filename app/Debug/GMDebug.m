@@ -112,6 +112,16 @@ static NSString *GMShort(id v) {
     } else if ([cmd isEqual:@"openpath"]) {
         if ([top respondsToSelector:@selector(debugOpenPath:)]) [(id)top debugOpenPath:arg];
         else GMLog(@"[thử] openpath: màn %@ không mở được thư mục", NSStringFromClass([top class]));
+    } else if ([cmd isEqual:@"snap"]) {
+        // Ảnh giao diện của app (vẽ lại cửa sổ — không dính nút AssistiveTouch / thanh trạng thái) cho trang giới thiệu
+        UIWindow *w = [UIApplication sharedApplication].keyWindow;
+        UIGraphicsBeginImageContextWithOptions(w.bounds.size, YES, 0);
+        [w.layer renderInContext:UIGraphicsGetCurrentContext()];
+        UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
+        NSString *path = arg.length ? arg : @"/var/mobile/Documents/gmsnap.png";
+        [UIImagePNGRepresentation(img) writeToFile:path atomically:YES];
+        GMLog(@"[thử] snap → %@ (%.0fx%.0f)", path, img.size.width * img.scale, img.size.height * img.scale);
     } else if ([cmd isEqual:@"notify"]) {
         // Báo Darwin (vd. thử tweak: vn.grammusic.lockcontrol/debug.lock | debug.dump)
         notify_post([arg UTF8String]);
