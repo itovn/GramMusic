@@ -1,8 +1,8 @@
 Package: vn.grammusic.app
 Name: GramMusic
-Version: 1.0.0
+Version: 1.0.1
 Architecture: iphoneos-arm
-Description: Nghe nhạc từ Telegram trên iPhone / iPad iOS 5 / iOS 6 (ứng dụng không chính thức, dùng Telegram API). Có MTProxy.
+Description: Nghe nhac Telegram tren iOS 5 / 6: FLAC, loi bai hat, dieu khien tren man hinh khoa (khong chinh thuc)
 Maintainer: GramMusic
 Author: GramMusic
 Section: Multimedia

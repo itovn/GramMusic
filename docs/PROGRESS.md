@@ -122,7 +122,18 @@
   nguồn Cydia ở nhánh `gh-pages` (https://itovn.github.io/GramMusic/ — `tools/update-cydia-repo.sh`). Trước khi đưa lên: rà khoá /
   IP / số điện thoại / mã chat / tên bài trong thư viện của anh khỏi tài liệu.
 
+- Ảnh giao diện cho trang giới thiệu (dữ liệu mẫu tự đặt: 5 nguồn, 19 bài, bìa và lời tự vẽ / tự viết): Thư viện, Nguồn, Đang phát
+  có lời chạy — chụp bằng lệnh thử `snap` (vẽ lại cửa sổ app, không dính nút AssistiveTouch), ghép thanh trạng thái 9:41.
+- Cydia không hiện gói trong nguồn GramMusic: máy đang cài bản thử `1.0.0-1+debug` (mới hơn bản trên nguồn → Cydia coi là gói cài tay).
+  Cài lại bản phát hành là hết; sau mỗi lần thử trên máy anh dùng thì cài lại bản phát hành.
+
+## 17/11/2026 — phát hành 1.0.1
+
+- Dòng mô tả gói trong Cydia viết không dấu (M21) — Cydia trên iOS 5 / 6 hiện chữ có dấu ở dòng này thành «?». App không đổi gì.
+  `symcheck` 340 ký hiệu, thiếu 0 trên iOS 5.1.1 (iPad 1).
+- Cùng sửa nguồn Cydia + `control` của Côn Bằng TV Legacy, TubeMini, Roza.
+
 ### Còn lại
 
-- [ ] Ảnh màn hình cho trang giới thiệu (dữ liệu mẫu — không dùng thư viện thật của anh).
+- [ ] Ảnh màn hình khoá có khung GramLockControl cho trang giới thiệu (cần anh bấm nút nguồn).
 - [ ] OTA (tự cập nhật như GramMini); mở bài FLAC nhanh hơn khi mạng chậm; iPad 1 đo giải mã + RAM.

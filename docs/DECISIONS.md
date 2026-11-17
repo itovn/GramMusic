@@ -223,3 +223,18 @@ dựng, giao diện) — ghi ở đây những gì riêng của GramMusic.
     không lời. Khung màn hình khoá giờ ghi «♪ Nhạc không lời» thay vì để trống.
   - Lõi: khung lời trong app và màn hình khoá cùng hỏi một bài → gộp thành một lần (khoá theo bài, bên sau đọc bản đã lưu); kết nối
     HTTPS nghỉ quá 20 giây thì bỏ (một lần tra mất 21 giây vì dùng lại kết nối đã chết khi mạng iPhone chập chờn).
+
+## M21. Dòng mô tả gói trong Cydia viết không dấu — 17/11/2026
+
+- Anh báo: Cydia → Đa Phương Tiện, dòng giới thiệu dưới tên gói bị lỗi tiếng Việt — cả Côn Bằng TV / TubeMini / Roza cũng vậy.
+- Nguyên nhân: Cydia 1.1.30 (bản trên máy iOS 5 / 6) lấy dòng `Description` qua `libapt-pkg` (apt7-lib 0.7.25.3) — hàm `LongDesc`
+  đổi chữ từ UTF-8 sang bảng mã của tiến trình (`nl_langinfo(CODESET)`); iOS không có locale UTF-8 (không có `/usr/share/locale`)
+  nên là US-ASCII, ký tự không đổi được thành «?». `Name`, `Section` Cydia đọc thẳng nên không bị. Trong thư viện có đúng chuỗi
+  «conversion from 'UTF-8' to '%s' not available», `nl_langinfo`, `iconv_open`.
+- Chọn (anh duyệt): `Description` trong `app/control` chỉ dùng chữ ASCII — không dấu, không «—»; giới thiệu có dấu để ở trang mô tả
+  (Depiction là trang web, hiện đúng). Bản **1.0.1** chỉ đổi dòng này. Cách khác (tweak trong Cydia báo bảng mã UTF-8) sửa được mọi
+  nguồn nhưng chỉ trên máy có cài — không làm.
+- Làm cùng cho Côn Bằng TV Legacy, TubeMini, Roza (anh nhờ): sửa `control` trong mã nguồn (bản sau tự đúng) và sửa dòng `Description`
+  trong `Packages` của nguồn Cydia đang chạy (tính lại `.gz` / `.bz2` / mã băm trong `Release`), không dựng lại app của các dự án đó.
+- Bài học khi sửa nguồn Cydia trên máy Windows: git có `core.autocrlf=true` — repo không có `.gitattributes` (TubeMini) thì `Packages`
+  lấy về mang CRLF; băm theo bản LF và commit với `-c core.autocrlf=false`, kẻo mã băm trong `Release` lệch với tệp trên trang.
