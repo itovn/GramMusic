@@ -7,10 +7,10 @@ Architectures: iphoneos-arm
 Components: main
 Description: GramMusic — nghe nhạc từ Telegram cho iPhone / iPad iOS 5 / iOS 6 đã jailbreak — https://itovn.github.io/GramMusic/
 MD5Sum:
- 969a81b54a5c6ac125282016d52837d9 1503 Packages
- a76e5dc4d402e949435afd42a18cf3cd 706 Packages.gz
- 1f1064dfd42c6fff800c938a099ccef2 850 Packages.bz2
+ b7430cc65479f03ea1ed8611aa01766c 2241 Packages
+ 8601a23fd5c0677ce059bb17d0ce20d5 822 Packages.gz
+ c9018b5eab29f0fe376d0c9dd3955916 1010 Packages.bz2
 SHA256:
- 5fdd69718cc5a636eb4ef286b829af8d48a33fbf947ec23a6724c19c217c273b 1503 Packages
- e02a5c1952815cb159436e65f664c10854a86d5e66abc58f971958e79b3782c5 706 Packages.gz
- 9050c891218d5fecf1c4e543fda0429c8436c81f61854538cdd5df931ba710b0 850 Packages.bz2
+ 614494f1d8ba76efd27fab37fd069cfb1fc1a0a7c195f9c6b821a23a45721fef 2241 Packages
+ 851abb009626913c0763a9f9822b576e40b73eabaaa20a1e405b49e24adee171 822 Packages.gz
+ eade75561f58c5d7f90560a67b19afc44e882c77474123c6b52723d13812a923 1010 Packages.bz2
