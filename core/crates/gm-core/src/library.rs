@@ -296,12 +296,38 @@ impl Library {
 
     /// Ghi các chỉ mục còn chưa ghi.
     pub fn flush(&mut self) -> std::io::Result<()> {
-        for p in std::mem::take(&mut self.unsaved) {
+        let mut todo: Vec<String> = std::mem::take(&mut self.unsaved).into_iter().collect();
+        while let Some(p) = todo.pop() {
             if let Some(i) = self.idx.get(&p) {
-                write_atomic(&self.dir.join(format!("{p}.json")), &serde_json::to_vec(i).unwrap_or_default())?;
+                if let Err(e) = write_atomic(&self.dir.join(format!("{p}.json")), &serde_json::to_vec(i).unwrap_or_default()) {
+                    // Lỗi (đầy đĩa…): nguồn này và các nguồn chưa kịp ghi để lần sau ghi lại — trước đây bị bỏ khỏi danh sách cần ghi
+                    self.unsaved.insert(p);
+                    self.unsaved.extend(todo);
+                    return Err(e);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Lấy ra các nguồn có bài chưa ghi: (khoá nguồn, đường dẫn, nội dung) — để ghi ở luồng blocking (`Core::flush_lib`), không
+    /// giữ luồng duy nhất của lõi (cổng phát, mọi lệnh) trong lúc ghi + sync cả tệp chỉ mục vài MB của kênh lớn. Ghi lỗi thì
+    /// `mark_unsaved`.
+    pub fn take_unsaved(&mut self) -> Vec<(String, PathBuf, Vec<u8>)> {
+        let peers = std::mem::take(&mut self.unsaved);
+        peers
+            .into_iter()
+            .filter_map(|p| {
+                let i = self.idx.get(&p)?;
+                let bytes = serde_json::to_vec(i).unwrap_or_default();
+                Some((p.clone(), self.dir.join(format!("{p}.json")), bytes))
+            })
+            .collect()
+    }
+
+    /// Ghi lại sau (lần ghi trước lỗi).
+    pub fn mark_unsaved(&mut self, peers: impl IntoIterator<Item = String>) {
+        self.unsaved.extend(peers);
     }
 
     /// Đánh dấu nguồn đã quét riêng xong.
@@ -352,7 +378,9 @@ impl Library {
         for (p, i) in self.idx.iter_mut() {
             let hit = match peer {
                 Some(x) => x == p,
-                None => !p.starts_with("-100"),
+                // Kênh / siêu nhóm theo cách đánh số của Bot API: −(10¹² + id). So theo chuỗi «-100…» thì nhóm thường có id bắt
+                // đầu bằng 100 (khoá «-1001234567») bị coi là kênh → tin bị xoá ở đó không bao giờ được bỏ khỏi thư viện
+                None => !p.parse::<i64>().is_ok_and(|v| v <= -1_000_000_000_000),
             };
             if !hit {
                 continue;
@@ -364,11 +392,8 @@ impl Library {
                 touched.push(p.clone());
             }
         }
-        for p in touched {
-            if let Some(i) = self.idx.get(&p) {
-                let _ = write_atomic(&self.dir.join(format!("{p}.json")), &serde_json::to_vec(i).unwrap_or_default());
-            }
-        }
+        // Ghi qua flush (bên gọi): ghi thẳng ở đây có thể bị một lần ghi cũ hơn đang chạy ở luồng khác đè lên
+        self.unsaved.extend(touched);
         if n > 0 {
             self.changed();
         }
@@ -504,8 +529,15 @@ impl Library {
 
 /// Ghi tệp tạm rồi đổi tên (không để tệp dở khi tắt app giữa chừng).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = path.with_extension("json.part");
-    std::fs::write(&tmp, bytes)?;
+    {
+        // sync trước khi đổi tên: máy treo / mất điện ngay sau đó (iOS cũ + tweak) thì còn tệp cũ hoặc tệp mới đủ, không phải tệp
+        // rỗng (sources.json rỗng = mất cả thư viện)
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, path)
 }
 
@@ -601,8 +633,17 @@ mod tests {
         let d = tmpdir("rm");
         let mut lib = lib_with_two_sources(&d);
         assert_eq!(lib.remove_songs(Some("-1001"), &[6]), 1);
-        assert_eq!(lib.remove_songs(None, &[2, 7]), 1); // chỉ nguồn không phải kênh
-        assert_eq!(lib.total(), 2);
+        // Tin bị xoá không kèm chat: chỉ nguồn không phải kênh. Kênh = −(10¹² + id); «-1001» là nhóm thường (id 1001 bắt đầu
+        // bằng 100 — trước đây bị coi là kênh)
+        let ch = "-1001234567890";
+        lib.upsert_source(Source { peer: ch.into(), name: "K".into(), kind: "channel".into(), enabled: true, ..Default::default() })
+            .unwrap();
+        let mut c = SourceIndex { peer: ch.into(), ..Default::default() };
+        c.merge(vec![song(ch, 7, "Kênh", "", 21)]);
+        lib.put_index(c).unwrap();
+        assert_eq!(lib.remove_songs(None, &[2, 7]), 2);
+        assert!(lib.song("1_2").is_none() && lib.song("-1001_7").is_none());
+        assert!(lib.song("-1001234567890_7").is_some());
         let _ = std::fs::remove_dir_all(&d);
     }
 

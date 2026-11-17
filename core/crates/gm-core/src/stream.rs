@@ -54,9 +54,81 @@ struct Pace {
     at: Instant,
 }
 
-/// Byte / giây ước của tệp gốc (cỡ / thời lượng; không rõ thời lượng: 64 KB/s ≈ 512 kbit/s).
+/// Byte / giây ước của tệp gốc (cỡ / thời lượng; không rõ thời lượng: 64 KB/s ≈ 512 kbit/s). Có khúc đầu thì dùng
+/// `Streams::track_bps` (đọc từ phần đầu tệp).
 pub fn raw_bps(song: &Song) -> f64 {
     if song.dur > 0 { song.size as f64 / song.dur as f64 } else { 64_000.0 }
+}
+
+/// Thông số đọc từ phần đầu tệp gốc (khi đã có khúc đầu).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct RawMeta {
+    /// Byte / giây theo phần đầu tệp — cho bài không ghi thời lượng (tệp gửi dạng tài liệu: WAV 176 KB/s mà ước 64 KB/s thì phát
+    /// được nửa phút là hết phần được trả, đứng chờ).
+    pub bps: Option<f64>,
+    /// Đầu phần thông tin nằm **sau** dữ liệu âm thanh mà iOS đọc trước khi phát: WAV — chunk sau «data» (ảnh bìa trong ID3…, có
+    /// khi hơn 1 MB); M4A — moov nằm sau mdat. Trả luôn phần này (không theo nhịp nghe) — trước đây chỉ trả 1 MB cuối, iOS chờ
+    /// tới hết giờ rồi báo lỗi -1001, bài .wav gửi kèm ảnh bìa không phát được.
+    pub tail_from: Option<u64>,
+}
+
+/// Đọc `RawMeta` từ phần đầu tệp `head` (đuôi `ext`, cỡ cả tệp `size`).
+pub(crate) fn raw_meta(ext: &str, head: &[u8], size: u64) -> RawMeta {
+    let tail_from = meta_after_audio(ext, head, size);
+    // Chỉ phần âm thanh chia thời lượng (ảnh bìa sau dữ liệu WAV không tính — tính vào thì bitrate cao hơn thật, đổi giây ra byte lệch)
+    let audio = tail_from.unwrap_or(size);
+    let bps = crate::info::duration(ext, head, &[], size).filter(|d| *d >= 1.0).map(|d| audio as f64 / d);
+    RawMeta { bps, tail_from }
+}
+
+fn meta_after_audio(ext: &str, head: &[u8], size: u64) -> Option<u64> {
+    let le32 = |i: usize| head.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64);
+    let be32 = |i: usize| head.get(i..i + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as u64);
+    let end = match ext {
+        "wav" => {
+            if head.get(0..4)? != b"RIFF" || head.get(8..12)? != b"WAVE" {
+                return None;
+            }
+            let mut off = 12usize;
+            loop {
+                let id = head.get(off..off + 4)?;
+                let len = le32(off + 4)?;
+                if id == b"data" {
+                    // 0 / FFFFFFFF: ghi kiểu luồng (không biết cỡ) — dữ liệu tới hết tệp
+                    if len == 0 || len == u32::MAX as u64 {
+                        return None;
+                    }
+                    break off as u64 + 8 + len;
+                }
+                let step = usize::try_from(len).ok()?.checked_add(8 + (len & 1) as usize)?;
+                off = off.checked_add(step)?;
+            }
+        }
+        "m4a" | "m4b" | "mp4" | "aac" | "alac" => {
+            let mut off = 0u64;
+            loop {
+                let i = usize::try_from(off).ok()?;
+                let mut len = be32(i)?;
+                let kind = head.get(i + 4..i + 8)?;
+                if len == 1 {
+                    let b = head.get(i + 8..i + 16)?;
+                    len = u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+                }
+                if len < 8 {
+                    return None; // 0 = hộp kéo tới hết tệp
+                }
+                if kind == b"moov" {
+                    return None; // moov ở đầu tệp: không cần đọc phần cuối
+                }
+                if kind == b"mdat" {
+                    break off.checked_add(len)?;
+                }
+                off = off.checked_add(len)?;
+            }
+        }
+        _ => return None,
+    };
+    (end < size).then_some(end)
 }
 
 /// Lỗi tải tạm thời (mạng chậm / mất, Telegram bắt chờ): đáng chờ rồi thử lại thay vì bỏ.
@@ -113,6 +185,8 @@ pub struct Track {
     fin: PathBuf,
     st: Mutex<TState>,
     notify: Notify,
+    /// Đọc một lần khi đã có khúc đầu (Streams::meta).
+    meta: std::sync::OnceLock<RawMeta>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -190,6 +264,7 @@ impl Track {
                 last_emit: now,
             }),
             notify: Notify::new(),
+            meta: std::sync::OnceLock::new(),
         })
     }
 
@@ -205,6 +280,15 @@ impl Track {
 
     pub fn is_done(&self) -> bool {
         lock(&self.st).done
+    }
+
+    /// Tệp của bài còn trên đĩa (xem Pcm::intact).
+    fn intact(&self) -> bool {
+        if self.is_done() {
+            self.fin.exists()
+        } else {
+            self.part.exists() || self.fin.exists()
+        }
     }
 
     /// Lỗi hẳn (không tự thử lại nữa) của lần tải gần nhất, khi không còn lượt tải nào chạy.
@@ -260,6 +344,8 @@ pub struct Streams {
     tracks: Mutex<HashMap<String, Arc<Track>>>,
     /// Bài đang / đã giải mã thành WAV (FLAC, OGG Vorbis, Opus).
     pcms: Mutex<HashMap<String, Arc<Pcm>>>,
+    /// Đang mở bản giải của bài (khoá → cổng): một lượt mở mỗi bài.
+    pcm_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Tệp trên máy cần giải mã (local.rs): khoá nội bộ `local_<băm>` → (bài, đường dẫn).
     locals: Mutex<HashMap<String, (Song, PathBuf)>>,
     /// Vị trí đang phát (nhịp nghe) — đổi thì đánh thức kết nối đang chờ.
@@ -290,6 +376,7 @@ impl Streams {
             emit,
             tracks: Mutex::new(HashMap::new()),
             pcms: Mutex::new(HashMap::new()),
+            pcm_gates: Mutex::new(HashMap::new()),
             locals: Mutex::new(HashMap::new()),
             pace: Mutex::new(None),
             pace_notify: Notify::new(),
@@ -310,10 +397,12 @@ impl Streams {
     pub fn track(&self, song: &Song) -> io::Result<Arc<Track>> {
         let key = song.key();
         let mut m = lock(&self.tracks);
-        m.retain(|k, t| *k == key || Track::active(&lock(&t.st)));
+        // Giữ cả bài còn có người cầm (luồng giải đang đọc qua TrackReader lúc tạm dừng — không «active» nhưng chưa xong): bỏ khỏi
+        // bảng thì lần sau mở bản thứ hai cùng tệp, hai bản ghi đè / đổi tên tệp của nhau
+        m.retain(|k, t| *k == key || Arc::strong_count(t) > 1 || Track::active(&lock(&t.st)));
         if let Some(t) = m.get(&key) {
-            // Bài đổi cỡ (tin bị sửa thay tệp): mở lại
-            if t.song.size == song.size {
+            // Bài đổi cỡ (tin bị sửa thay tệp) / tệp đã bị xoá khỏi đệm: mở lại
+            if t.song.size == song.size && t.intact() {
                 return Ok(Arc::clone(t));
             }
         }
@@ -403,26 +492,51 @@ impl Streams {
     /// WAV giải mã của bài (FLAC / OGG / Opus): mở (đọc phần đầu tệp gốc — tải khúc đầu nếu chưa có), dọn bản đã giải cũ.
     pub async fn pcm(self: &Arc<Self>, song: &Song) -> io::Result<Arc<Pcm>> {
         let key = song.key();
-        if let Some(p) = lock(&self.pcms).get(&key) {
-            if p.song.size == song.size {
-                return Ok(Arc::clone(p));
+        if let Some(p) = self.known_pcm(&key, song) {
+            return Ok(p);
+        }
+        // Một lượt mở mỗi bài: play.ready và GET của AVPlayer tới cùng lúc → trước đây hai Pcm, hai luồng giải cùng ghi một tệp
+        let gate = lock(&self.pcm_gates).entry(key.clone()).or_default().clone();
+        let _g = gate.lock().await;
+        if let Some(p) = self.known_pcm(&key, song) {
+            return Ok(p);
+        }
+        let opened = self.open_pcm(song).await;
+        let pcm = match opened {
+            Ok(p) => p,
+            Err(e) => {
+                lock(&self.pcm_gates).remove(&key);
+                return Err(e);
+            }
+        };
+        {
+            let mut m = lock(&self.pcms);
+            m.insert(key.clone(), Arc::clone(&pcm));
+            // Giữ bài đang dùng + vài bài gần nhất; bỏ bản ghi của bài đã xoá khỏi đĩa
+            let mut keep: HashSet<String> = m.iter().filter(|(_, p)| p.busy()).map(|(k, _)| k.clone()).collect();
+            keep.insert(key.clone());
+            for gone in decode::prune(&self.dir, &keep) {
+                m.remove(&gone);
             }
         }
+        lock(&self.pcm_gates).remove(&key);
+        Ok(pcm)
+    }
+
+    /// Bản giải đang nhớ của bài, nếu còn dùng được (cùng cỡ, tệp còn trên đĩa).
+    fn known_pcm(&self, key: &str, song: &Song) -> Option<Arc<Pcm>> {
+        let m = lock(&self.pcms);
+        let p = m.get(key)?;
+        (p.song.size == song.size && p.intact()).then(|| Arc::clone(p))
+    }
+
+    async fn open_pcm(self: &Arc<Self>, song: &Song) -> io::Result<Arc<Pcm>> {
         let reader = self.source(song)?;
         let (dir, s2) = (self.dir.clone(), song.clone());
         let pcm = tokio::task::spawn_blocking(move || Pcm::open(&dir, s2, reader))
             .await
             .map_err(|e| io::Error::other(e.to_string()))??;
-        let pcm = Arc::new(pcm);
-        let mut m = lock(&self.pcms);
-        m.insert(key.clone(), Arc::clone(&pcm));
-        // Giữ bài đang dùng + vài bài gần nhất; bỏ bản ghi của bài đã xoá khỏi đĩa
-        let mut keep: HashSet<String> = m.iter().filter(|(_, p)| p.busy()).map(|(k, _)| k.clone()).collect();
-        keep.insert(key);
-        for gone in decode::prune(&self.dir, &keep) {
-            m.remove(&gone);
-        }
-        Ok(pcm)
+        Ok(Arc::new(pcm))
     }
 
     /// Chạy luồng giải (blocking) cho bài nếu đang nghỉ.
@@ -442,9 +556,33 @@ impl Streams {
         tokio::task::spawn_blocking(move || p.run(reader, &limit));
     }
 
+    /// Thông số đọc từ phần đầu tệp gốc của bài (chưa có khúc đầu: để trống, lần sau đọc lại).
+    pub(crate) fn meta(&self, t: &Track) -> RawMeta {
+        if let Some(m) = t.meta.get() {
+            return *m;
+        }
+        if !lock(&t.st).have.first().copied().unwrap_or(false) {
+            return RawMeta::default();
+        }
+        let n = t.song.size.min(64 * 1024) as usize;
+        match self.read_range(t, 0, n) {
+            Ok(head) => *t.meta.get_or_init(|| raw_meta(&t.song.ext, &head, t.song.size)),
+            Err(_) => RawMeta::default(),
+        }
+    }
+
+    /// Byte / giây của tệp gốc: theo thời lượng Telegram ghi; không có thì đọc từ phần đầu tệp; không được nữa thì 64 KB/s.
+    pub(crate) fn track_bps(&self, t: &Track) -> f64 {
+        if t.song.dur > 0 {
+            return raw_bps(&t.song);
+        }
+        self.meta(t).bps.unwrap_or_else(|| raw_bps(&t.song))
+    }
+
     /// Bỏ theo dõi (bài vừa bị xoá khỏi bộ nhớ đệm).
     pub fn forget(&self, key: &str) {
         lock(&self.tracks).remove(key);
+        lock(&self.pcms).remove(key);
     }
 
     /// Đường dẫn tệp đầy đủ của bài nếu đã tải đủ.
@@ -553,7 +691,7 @@ impl Streams {
         let t = self.track(song)?;
         let n = song.size.div_ceil(BLOCK) as u32;
         // Tệp gốc (mp3 / m4a…): AVPlayer tự đổi giây ra byte — ước theo bitrate trung bình, lấy cả khúc trước / sau cho chắc
-        let b = ((pos * raw_bps(song)) as u64).min(song.size - 1) / BLOCK;
+        let b = ((pos * self.track_bps(&t)) as u64).min(song.size - 1) / BLOCK;
         let b = b as u32;
         for b in b.saturating_sub(1)..=(b + 1).min(n - 1) {
             loop {
@@ -574,7 +712,7 @@ impl Streams {
 
     /// Chạy thêm lượt tải cho bài nếu còn khúc cần và chưa đủ lượt.
     fn pump(self: &Arc<Self>, t: &Arc<Track>) {
-        let limit = self.limit(&t.song.key(), t.song.size, 0, raw_bps(&t.song));
+        let limit = self.limit(&t.song.key(), t.song.size, 0, self.track_bps(t));
         loop {
             let b = {
                 let mut st = lock(&t.st);
@@ -637,7 +775,7 @@ impl Streams {
                 }
             }
             // Khúc tiếp theo cho lượt này
-            let limit = self.limit(&t.song.key(), t.song.size, 0, raw_bps(&t.song));
+            let limit = self.limit(&t.song.key(), t.song.size, 0, self.track_bps(&t));
             let next = {
                 let mut st = lock(&t.st);
                 st.inflight.remove(&b);
@@ -978,12 +1116,15 @@ impl Streams {
         lock(&t.st).readers += 1;
         let _guard = Reader(Arc::clone(&t));
         let mut pos = start;
-        let (rkey, rbps) = (song.key(), raw_bps(&song));
+        let (rkey, rbps) = (song.key(), self.track_bps(&t));
+        // Phần thông tin sau dữ liệu âm thanh (ảnh bìa WAV, moov của M4A): iOS đọc trước khi phát — trả luôn
+        let tail_from = self.meta(&t).tail_from.unwrap_or(u64::MAX);
         let mut waiting = false;
         while pos <= end {
             let b = (pos / BLOCK) as u32;
+            let meta_block = (b as u64 + 1) * BLOCK > tail_from;
             // Nhịp nghe: chưa tới thì chờ (tạm dừng → đứng yên), vẫn theo dõi trình phát ngắt kết nối
-            while !self.may_serve(&rkey, b as u64 * BLOCK, size, 0, rbps) {
+            while !meta_block && !self.may_serve(&rkey, b as u64 * BLOCK, size, 0, rbps) {
                 tokio::select! {
                     _ = self.pace_notify.notified() => {}
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -1294,6 +1435,79 @@ mod tests {
         let bad = url.replace("/s/", "/s/x");
         assert!(get(&bad, None).await.0.starts_with("HTTP/1.1 404"));
         assert!(get(&url, Some(&format!("bytes={size}-"))).await.0.starts_with("HTTP/1.1 416"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// WAV gốc (không giải mã) có chunk thông tin `tail` byte sau dữ liệu âm thanh `data` byte (44,1 kHz stereo 16 bit).
+    fn wav_with_tail(data: usize, tail: usize) -> Vec<u8> {
+        let mut v = Vec::with_capacity(44 + data + 8 + tail);
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&((36 + data + 8 + tail) as u32).to_le_bytes());
+        v.extend_from_slice(b"WAVEfmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&[1, 0, 2, 0]);
+        v.extend_from_slice(&44_100u32.to_le_bytes());
+        v.extend_from_slice(&176_400u32.to_le_bytes());
+        v.extend_from_slice(&[4, 0, 16, 0]);
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&(data as u32).to_le_bytes());
+        v.extend((0..data).map(|i| (i * 7 % 251) as u8));
+        v.extend_from_slice(b"id3 ");
+        v.extend_from_slice(&(tail as u32).to_le_bytes());
+        v.extend((0..tail).map(|i| (i * 13 % 241) as u8));
+        v
+    }
+
+    #[test]
+    fn raw_meta_reads_wav_and_m4a() {
+        let w = wav_with_tail(8 << 20, 1_500_000);
+        let m = raw_meta("wav", &w[..65536], w.len() as u64);
+        assert_eq!(m.tail_from, Some(44 + (8 << 20)));
+        let bps = m.bps.unwrap();
+        assert!((176_400.0..190_000.0).contains(&bps), "{bps}");
+        // WAV không có gì sau dữ liệu: không có phần cuối
+        let w2 = wav_with_tail(1 << 20, 0);
+        assert_eq!(raw_meta("wav", &w2[..4096], (44 + (1 << 20)) as u64).tail_from, None);
+        // M4A: ftyp, mdat (1 MB), rồi moov ở cuối
+        let mut a = Vec::new();
+        a.extend_from_slice(&24u32.to_be_bytes());
+        a.extend_from_slice(b"ftypM4A \0\0\0\0M4A isom");
+        a.extend_from_slice(&((1 << 20) as u32 + 8).to_be_bytes());
+        a.extend_from_slice(b"mdat");
+        assert_eq!(meta_after_audio("m4a", &a, 24 + (1 << 20) + 8 + 5000), Some(24 + (1 << 20) + 8));
+        // moov ở đầu: không cần
+        let mut b = Vec::new();
+        b.extend_from_slice(&16u32.to_be_bytes());
+        b.extend_from_slice(b"moov\0\0\0\0\0\0\0\0");
+        assert_eq!(meta_after_audio("m4a", &b, 10_000), None);
+        // Phần đầu cụt / rác: không panic
+        assert_eq!(meta_after_audio("wav", b"RIFF\xff\xff\xff\xffWAVEfmt \xff\xff\xff\xff", 1 << 30), None);
+        assert_eq!(meta_after_audio("m4a", &[0, 0, 0, 1, b'm', b'd', b'a', b't'], 100), None);
+    }
+
+    /// WAV gửi dạng tài liệu (không có thời lượng) kèm ảnh bìa 1,5 MB sau dữ liệu: iOS đọc phần đó trước khi phát — phải trả ngay,
+    /// không chờ nhịp nghe (lỗi -1001 trên iPad mini / iPhone 5, 17/11).
+    #[tokio::test]
+    async fn raw_wav_tail_metadata_served_without_pace() {
+        let dir = std::env::temp_dir().join(format!("gmu-rawwav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data = wav_with_tail(12 << 20, 1_500_000);
+        let size = data.len();
+        let fake = Arc::new(Fake { data, calls: AtomicUsize::new(0), fail_first: AtomicUsize::new(0), down_from: net_up(), down_to: net_up() });
+        let song = Song { peer: "-1003".into(), id: 9, title: "t".into(), size: size as u64, ext: "wav".into(), ..Default::default() };
+        let s2 = song.clone();
+        let st = Streams::new(dir.join("music"), fake.clone(), Arc::new(|_| {}), Box::new(move |k| (k == s2.key()).then(|| s2.clone())));
+        let url = st.url(&song).await.unwrap();
+        st.set_pace(&song.key(), 0.0, true);
+        assert_eq!(get(&url, Some("bytes=0-1")).await.1.len(), 2);
+        let from = 44 + (12 << 20);
+        let r = tokio::time::timeout(Duration::from_secs(5), get(&url, Some(&format!("bytes={from}-")))).await;
+        let (h, body) = r.expect("phần cuối (ảnh bìa) phải trả ngay, không chờ nhịp nghe");
+        assert!(h.starts_with("HTTP/1.1 206"), "{h}");
+        assert_eq!(body, fake.data[from..]);
+        // Bitrate theo phần đầu tệp (176 KB/s), không phải 64 KB/s ước mặc định
+        let t = st.track(&song).unwrap();
+        assert!(st.track_bps(&t) > 170_000.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

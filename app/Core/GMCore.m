@@ -28,30 +28,36 @@ static id GMUnNull(id v) {
     return v == [NSNull null] ? nil : v;
 }
 
-// Luồng của lõi; chuỗi chỉ dùng được trong lúc gọi → phân tích ngay rồi chuyển về luồng chính.
+// Luồng của lõi; chuỗi chỉ dùng được trong lúc gọi → phân tích ngay rồi chuyển về luồng chính. @autoreleasepool: luồng của lõi
+// (Rust) không có sẵn bể tự giải phóng — iOS 5 / 6 không tự tạo cho luồng lạ, NSData / đối tượng JSON tạm của mỗi sự kiện (tiến độ
+// tải ~mỗi giây) rò mãi.
 static void GMOnEvent(const char *json, void *ctx) {
-    NSDictionary *ev = GMParse(json);
-    if (![ev isKindOfClass:[NSDictionary class]]) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [[NSNotificationCenter defaultCenter] postNotificationName:GMCoreEventNotification object:nil userInfo:ev];
-    });
+    @autoreleasepool {
+        NSDictionary *ev = GMParse(json);
+        if (![ev isKindOfClass:[NSDictionary class]]) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[NSNotificationCenter defaultCenter] postNotificationName:GMCoreEventNotification object:nil userInfo:ev];
+        });
+    }
 }
 
 static void GMOnResult(const char *json, void *ctx) {
-    NSDictionary *r = GMParse(json);
-    NSArray *h = (__bridge_transfer NSArray *)ctx;  // @[done, tên lệnh, lúc gọi]
-    dispatch_async(dispatch_get_main_queue(), ^{
-        GMDone done = [h objectAtIndex:0];
-        long long ms = GMNowMs() - [[h objectAtIndex:2] longLongValue];
-        id err = [r isKindOfClass:[NSDictionary class]] ? [r objectForKey:@"err"] : @{@"code": @"BAD_JSON", @"msg": @"Lõi trả kết quả không đọc được"};
-        if ([err isKindOfClass:[NSDictionary class]]) {
-            GMLog(@"[lõi] %@ lỗi %@ sau %lld ms", [h objectAtIndex:1], [err objectForKey:@"code"], ms);
-            done(nil, err);
-        } else {
-            if (ms > 1500) GMLog(@"[lõi] %@ chậm: %lld ms", [h objectAtIndex:1], ms);
-            done(GMUnNull([r objectForKey:@"ok"]), nil);
-        }
-    });
+    @autoreleasepool {
+        NSDictionary *r = GMParse(json);
+        NSArray *h = (__bridge_transfer NSArray *)ctx;  // @[done, tên lệnh, lúc gọi]
+        dispatch_async(dispatch_get_main_queue(), ^{
+            GMDone done = [h objectAtIndex:0];
+            long long ms = GMNowMs() - [[h objectAtIndex:2] longLongValue];
+            id err = [r isKindOfClass:[NSDictionary class]] ? [r objectForKey:@"err"] : @{@"code": @"BAD_JSON", @"msg": @"Lõi trả kết quả không đọc được"};
+            if ([err isKindOfClass:[NSDictionary class]]) {
+                GMLog(@"[lõi] %@ lỗi %@ sau %lld ms", [h objectAtIndex:1], [err objectForKey:@"code"], ms);
+                done(nil, err);
+            } else {
+                if (ms > 1500) GMLog(@"[lõi] %@ chậm: %lld ms", [h objectAtIndex:1], ms);
+                done(GMUnNull([r objectForKey:@"ok"]), nil);
+            }
+        });
+    }
 }
 
 static NSString *GMMachine(void) {

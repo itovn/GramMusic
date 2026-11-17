@@ -14,6 +14,13 @@ use symphonia::core::io::MediaSource;
 
 /// Opus cần chừng này mẫu giải trước điểm tua để ra tiếng đúng (RFC 7845: 80 ms).
 const PREROLL: i64 = 3840;
+/// Gói Opus dài nhất ~61 KB (48 khung × 1275 byte) — tệp hỏng nối đoạn mãi không hết gói thì bỏ, không gom tới hết RAM.
+const MAX_PACKET: usize = 128 * 1024;
+
+/// Lỗi đọc tệp gốc (mạng mất khi đang tải khúc…) — chữ như SymSrc để stream.rs nhận ra lỗi tạm (giữ kết nối, chờ mạng — M22).
+fn io_err(e: io::Error) -> String {
+    format!("đọc tệp lỗi: {e}")
+}
 
 fn crc_table() -> &'static [u32; 256] {
     static T: OnceLock<[u32; 256]> = OnceLock::new();
@@ -68,26 +75,27 @@ fn read_at(r: &mut dyn MediaSource, off: u64, buf: &mut [u8]) -> io::Result<()> 
     r.read_exact(buf)
 }
 
-/// Trang Ogg ở đúng `off` (đúng chữ ký, CRC khớp); None nếu không phải.
-fn page_at(r: &mut dyn MediaSource, off: u64, size: u64) -> Option<Page> {
+/// Trang Ogg ở đúng `off` (đúng chữ ký, CRC khớp); Ok(None) nếu không phải. Đọc lỗi (mạng) → Err — không coi là «không phải
+/// trang»: trước đây lỗi đọc thành None → `next` báo hết tệp → phần còn lại của bài ghi thành im lặng và nhớ luôn vào bộ đệm.
+fn page_at(r: &mut dyn MediaSource, off: u64, size: u64) -> io::Result<Option<Page>> {
     if off + 27 > size {
-        return None;
+        return Ok(None);
     }
     let mut h = [0u8; 27];
-    read_at(r, off, &mut h).ok()?;
+    read_at(r, off, &mut h)?;
     if &h[0..4] != b"OggS" || h[4] != 0 {
-        return None;
+        return Ok(None);
     }
     let nseg = h[26] as usize;
     let mut lacing = vec![0u8; nseg];
-    r.read_exact(&mut lacing).ok()?;
+    r.read_exact(&mut lacing)?;
     let blen: usize = lacing.iter().map(|&l| l as usize).sum();
     let len = 27 + nseg as u64 + blen as u64;
     if off + len > size {
-        return None;
+        return Ok(None);
     }
     let mut body = vec![0u8; blen];
-    r.read_exact(&mut body).ok()?;
+    r.read_exact(&mut body)?;
     let want = u32::from_le_bytes([h[22], h[23], h[24], h[25]]);
     let mut all = Vec::with_capacity(len as usize);
     all.extend_from_slice(&h[..22]);
@@ -96,32 +104,32 @@ fn page_at(r: &mut dyn MediaSource, off: u64, size: u64) -> Option<Page> {
     all.extend_from_slice(&lacing);
     all.extend_from_slice(&body);
     if crc(&all) != want {
-        return None;
+        return Ok(None);
     }
-    Some(Page {
+    Ok(Some(Page {
         off,
         len,
-        granule: i64::from_le_bytes(h[6..14].try_into().ok()?),
+        granule: i64::from_le_bytes([h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13]]),
         flags: h[5],
         serial: u32::from_le_bytes([h[14], h[15], h[16], h[17]]),
         lacing,
         body,
-    })
+    }))
 }
 
-/// Trang hợp lệ đầu tiên bắt đầu từ `from` trở đi, dò trong `max` byte.
-fn find_page(r: &mut dyn MediaSource, from: u64, size: u64, max: u64) -> Option<Page> {
+/// Trang hợp lệ đầu tiên bắt đầu từ `from` trở đi, dò trong `max` byte (Ok(None) = không có). Đọc lỗi → Err.
+fn find_page(r: &mut dyn MediaSource, from: u64, size: u64, max: u64) -> io::Result<Option<Page>> {
     let end = (from + max).min(size);
     let mut at = from;
     while at + 27 <= end {
         let n = (64 * 1024).min((end - at) as usize);
         let mut buf = vec![0u8; n];
-        read_at(r, at, &mut buf).ok()?;
+        read_at(r, at, &mut buf)?;
         let mut i = 0;
         while i + 4 <= n {
             if &buf[i..i + 4] == b"OggS" {
-                if let Some(p) = page_at(r, at + i as u64, size) {
-                    return Some(p);
+                if let Some(p) = page_at(r, at + i as u64, size)? {
+                    return Ok(Some(p));
                 }
             }
             i += 1;
@@ -131,7 +139,7 @@ fn find_page(r: &mut dyn MediaSource, from: u64, size: u64, max: u64) -> Option<
         }
         at += (n - 3) as u64;
     }
-    None
+    Ok(None)
 }
 
 pub struct OpusSrc {
@@ -155,7 +163,7 @@ impl OpusSrc {
     /// Đọc OpusHead / OpusTags, tìm trang cuối để biết tổng số mẫu.
     pub fn open(mut r: Box<dyn MediaSource>) -> Result<OpusSrc, String> {
         let size = r.byte_len().ok_or("không biết cỡ tệp")?;
-        let p0 = page_at(&mut *r, 0, size).ok_or("không phải tệp Ogg")?;
+        let p0 = page_at(&mut *r, 0, size).map_err(io_err)?.ok_or("không phải tệp Ogg")?;
         if p0.body.len() < 19 || &p0.body[0..8] != b"OpusHead" {
             return Err("không phải Ogg Opus".into());
         }
@@ -170,18 +178,19 @@ impl OpusSrc {
         // OpusTags (có thể dài nhiều trang) — trang âm thanh đầu tiên bắt đầu sau trang kết thúc gói tags
         let mut off = p0.off + p0.len;
         let data_start = loop {
-            let p = find_page(&mut *r, off, size, 1 << 20).ok_or("thiếu OpusTags")?;
+            let p = find_page(&mut *r, off, size, 1 << 20).map_err(io_err)?.ok_or("thiếu OpusTags")?;
             off = p.off + p.len;
             if p.serial == serial && p.segments().any(|(_, _, end)| end) {
                 break off;
             }
         };
-        // Trang cuối (granule lớn nhất của luồng)
+        // Trang cuối (granule lớn nhất của luồng). Đọc lỗi thì báo lỗi (thử lại khi có mạng), không đoán theo thời lượng: đoán
+        // thì lần mở sau (có mạng) ra tổng số mẫu khác → «tệp gốc đã đổi», bài không phát được tới khi mở lại app
         let mut total = 0i64;
         for back in [64u64 << 10, 256 << 10, 1 << 20] {
             let from = size.saturating_sub(back).max(data_start);
             let mut at = from;
-            while let Some(p) = find_page(&mut *r, at, size, size - at) {
+            while let Some(p) = find_page(&mut *r, at, size, size - at).map_err(io_err)? {
                 if p.serial == serial && p.granule > 0 {
                     total = total.max(p.granule);
                 }
@@ -222,7 +231,7 @@ impl OpusSrc {
                     break;
                 }
                 let mid = lo + (hi - lo) / 2;
-                match find_page(&mut *self.r, mid, self.size, hi - mid) {
+                match find_page(&mut *self.r, mid, self.size, hi - mid).map_err(io_err)? {
                     Some(p) if p.off < hi => {
                         if p.serial != self.serial || p.granule < 0 || p.granule <= target {
                             if p.serial == self.serial && p.granule >= 0 {
@@ -241,7 +250,7 @@ impl OpusSrc {
             if let Some(b) = &best {
                 at = b.off + b.len;
             }
-            while let Some(p) = find_page(&mut *self.r, at, self.size, 128 * 1024) {
+            while let Some(p) = find_page(&mut *self.r, at, self.size, 128 * 1024).map_err(io_err)? {
                 if p.serial == self.serial && p.granule >= 0 {
                     if p.granule > target {
                         break;
@@ -295,9 +304,9 @@ impl OpusSrc {
             if self.next_off + 27 > self.size {
                 return Ok(None);
             }
-            let p = match page_at(&mut *self.r, self.next_off, self.size) {
+            let p = match page_at(&mut *self.r, self.next_off, self.size).map_err(io_err)? {
                 Some(p) => p,
-                None => match find_page(&mut *self.r, self.next_off, self.size, 1 << 20) {
+                None => match find_page(&mut *self.r, self.next_off, self.size, 1 << 20).map_err(io_err)? {
                     Some(p) => p,
                     None => return Ok(None),
                 },
@@ -316,6 +325,9 @@ impl OpusSrc {
                     continue;
                 }
                 self.pending.extend_from_slice(&p.body[s..s + l]);
+                if self.pending.len() > MAX_PACKET {
+                    self.pending.clear(); // tệp hỏng: phần gói còn lại ra gói cụt → giải lỗi → bỏ qua
+                }
                 if end {
                     self.packets.push_back(std::mem::take(&mut self.pending));
                 }
@@ -334,7 +346,56 @@ mod tests {
         let d = std::fs::read(format!("{}/tests/data/tone.opus", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let size = d.len() as u64;
         let mut r: Box<dyn MediaSource> = Box::new(std::io::Cursor::new(d));
-        let p = page_at(&mut *r, 0, size).expect("trang đầu hợp lệ");
+        let p = page_at(&mut *r, 0, size).unwrap().expect("trang đầu hợp lệ");
         assert_eq!(&p.body[0..8], b"OpusHead");
+    }
+
+    /// Đọc lỗi giữa bài (mạng mất lúc chờ khúc) → `next` báo lỗi chứ không báo hết tệp (hết tệp = phần còn lại ghi thành im lặng).
+    #[test]
+    fn read_error_is_not_end_of_file() {
+        struct Flaky {
+            data: std::io::Cursor<Vec<u8>>,
+            fail_from: u64,
+        }
+        impl std::io::Read for Flaky {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if self.data.position() >= self.fail_from {
+                    return Err(io::Error::other("NETWORK: mất mạng"));
+                }
+                let n = buf.len().min((self.fail_from - self.data.position()) as usize);
+                self.data.read(&mut buf[..n])
+            }
+        }
+        impl std::io::Seek for Flaky {
+            fn seek(&mut self, p: SeekFrom) -> io::Result<u64> {
+                self.data.seek(p)
+            }
+        }
+        impl MediaSource for Flaky {
+            fn is_seekable(&self) -> bool {
+                true
+            }
+            fn byte_len(&self) -> Option<u64> {
+                Some(self.data.get_ref().len() as u64)
+            }
+        }
+        let d = std::fs::read(format!("{}/tests/data/tone.opus", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let size = d.len() as u64;
+        // Mở được khi đủ dữ liệu, rồi mạng mất ở giữa: giải tới chỗ mất phải ra Err (có chữ NETWORK cho stream.rs)
+        let mut o = OpusSrc::open(Box::new(std::io::Cursor::new(d.clone()))).unwrap();
+        let total = o.total;
+        let src = Flaky { data: std::io::Cursor::new(d), fail_from: size / 2 };
+        o.r = Box::new(src);
+        let mut out = Vec::new();
+        let mut got = 0u64;
+        let err = loop {
+            match o.next(&mut out) {
+                Ok(Some(_)) => got += (out.len() / o.channels) as u64,
+                Ok(None) => panic!("đọc lỗi bị coi là hết tệp sau {got}/{total} mẫu"),
+                Err(e) => break e,
+            }
+        };
+        assert!(err.contains("NETWORK"), "{err}");
+        assert!(got < total);
     }
 }

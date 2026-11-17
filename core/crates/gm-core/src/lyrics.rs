@@ -144,7 +144,9 @@ pub fn clean_name(s: &str) -> String {
 
 /// Ca sĩ chính (bỏ «feat.», «ft.», «&», «,», «x» phía sau) — LRCLIB thường ghi một ca sĩ.
 fn main_artist(a: &str) -> String {
-    let low = a.to_lowercase();
+    // Chữ thường kiểu ASCII: giữ nguyên số byte nên vị trí tìm được cắt đúng chuỗi gốc (to_lowercase đổi số byte với «İ», «K»
+    // Kelvin… → cắt lệch, có khi giữa một ký tự → panic, app sập)
+    let low = a.to_ascii_lowercase();
     let mut cut = a.len();
     for sep in [" feat", " ft.", " ft ", " & ", ", ", " x ", " và ", ";"] {
         if let Some(i) = low.find(sep) {
@@ -299,6 +301,9 @@ mod tests {
         assert_eq!(clean_name("03 - Hello_World"), "Hello World");
         assert_eq!(main_artist("Sơn Tùng M-TP feat. Snoop Dogg"), "Sơn Tùng M-TP");
         assert_eq!(main_artist("Adele"), "Adele");
+        // «İ» đổi số byte khi to_lowercase: trước đây cắt lệch giữa «Đ» → panic
+        assert_eq!(main_artist("İİ;Đen"), "İİ");
+        assert_eq!(main_artist("İbrahim Tatlıses, X"), "İbrahim Tatlıses");
     }
 
     #[test]

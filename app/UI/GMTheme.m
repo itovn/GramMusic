@@ -1035,7 +1035,9 @@ static NSDateComponents *GMDay(NSDate *d) {
     l.clipsToBounds = YES;
     CGSize s = [text sizeWithFont:l.font];
     CGFloat w = MIN(view.bounds.size.width - 40, s.width + 30);
-    l.frame = CGRectMake(floor((view.bounds.size.width - w) / 2), floor(view.bounds.size.height * 0.62), w, 36);
+    // Bảng (UIScrollView): bounds.origin = chỗ đang cuộn tới — không cộng vào thì thông báo nằm ở đầu nội dung, khuất màn hình
+    CGRect b = view.bounds;
+    l.frame = CGRectMake(floor(b.origin.x + (b.size.width - w) / 2), floor(b.origin.y + b.size.height * 0.62), w, 36);
     l.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
     [view addSubview:l];
     [UIView animateWithDuration:0.3 delay:1.6 options:0 animations:^{ l.alpha = 0; }

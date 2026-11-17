@@ -138,6 +138,9 @@ typedef NS_ENUM(NSInteger, GMLoginStep) { GMStepPhone, GMStepCode, GMStepPasswor
 - (void)busy:(BOOL)busy {
     _go.enabled = !busy;
     _field.enabled = !busy;
+    // Đang kiểm mã / mật khẩu: «Quay lại» lúc này thì lõi vẫn đăng nhập xong mà màn này đã về bước đầu (kết quả bị bỏ). Bước số
+    // điện thoại vẫn cho «Đóng» (gửi mã treo vì mạng thì vẫn thoát được)
+    self.navigationItem.leftBarButtonItem.enabled = !busy || _step == GMStepPhone;
     if (busy) {
         _status.text = @"";
         [_spin startAnimating];
@@ -169,8 +172,14 @@ typedef NS_ENUM(NSInteger, GMLoginStep) { GMStepPhone, GMStepCode, GMStepPasswor
         [GMCore call:@"auth.signIn" args:@{@"code": v} done:^(id ok, NSDictionary *err) {
             if (gen != _gen) return;
             [self busy:NO];
-            if ([[err objectForKey:@"code"] isEqual:@"PASSWORD_NEEDED"]) {
+            NSString *code = GMVal(err, @"code");
+            if ([code isEqual:@"PASSWORD_NEEDED"]) {
                 [self show:GMStepPassword hint:GMVal(err, @"hint")];
+            } else if ([code isEqual:@"PHONE_CODE_EXPIRED"] || [code isEqual:@"NO_CODE"]) {
+                // Mã hết hạn / lõi không còn lượt đăng nhập: thử lại cùng mã vô ích — về bước số điện thoại để xin mã mới
+                [self show:GMStepPhone hint:nil];
+                _field.text = _phone;
+                _status.text = @"Mã đã hết hạn — bấm «Gửi mã» để nhận mã mới.";
             } else if (err) {
                 _status.text = GMErrorText(err);
             } else {

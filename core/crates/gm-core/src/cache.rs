@@ -120,6 +120,13 @@ fn remove(e: &Entry) -> bool {
     ok
 }
 
+/// Tệp của bài đang dùng? Theo khoá bài, hoặc theo tên tệp — bản giải của tệp trên máy (`local_<băm>.pcm.wav`) không có khoá
+/// `<peer>_<id>` nên trước đây «Xoá đệm» xoá luôn tệp đang phát.
+fn in_use(e: &Entry, busy: &HashSet<String>) -> bool {
+    e.key.as_ref().is_some_and(|k| busy.contains(k))
+        || e.path.file_name().and_then(|n| n.to_str()).and_then(|n| n.split('.').next()).is_some_and(|s| busy.contains(s))
+}
+
 fn age(now: SystemTime, e: &Entry) -> Duration {
     now.duration_since(e.used).unwrap_or_default()
 }
@@ -151,7 +158,7 @@ pub fn clear(
                 continue;
             }
         }
-        if e.key.as_ref().is_some_and(|k| busy.contains(k)) || (e.temp && age(now, &e) < Duration::from_secs(120)) {
+        if in_use(&e, busy) || (e.temp && age(now, &e) < Duration::from_secs(120)) {
             continue;
         }
         if remove(&e) {
@@ -179,7 +186,7 @@ pub fn trim(data_dir: &Path, p: Policy, offline: &HashSet<String>, busy: &HashSe
     let mut r = Trimmed::default();
     let mut rest = Vec::new();
     for e in scan(data_dir, offline) {
-        if e.kind == "offline" || e.key.as_ref().is_some_and(|k| busy.contains(k)) {
+        if e.kind == "offline" || in_use(&e, busy) {
             continue;
         }
         let a = age(now, &e);
@@ -376,6 +383,20 @@ mod tests {
         assert!(!m.exists() && !cv.exists() && o.exists());
         assert_eq!(clear(&d, &off, Some(&["offline".into()]), None, Some(&set(&["2_1"])), &HashSet::new()), (20, 1));
         assert!(!o.exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn clear_keeps_busy_local_decode() {
+        // Bản giải của tệp trên máy (`local_<băm>`) không có khoá `<peer>_<id>` — vẫn phải nhận ra là đang dùng
+        let d = tmpdir("clear-local");
+        let playing = put(&d, "music", "local_123.pcm.wav.part", 10, 100);
+        let pmap = put(&d, "music", "local_123.pcm.wav.map", 1, 100);
+        let idle = put(&d, "music", "local_456.pcm.wav", 20, 100);
+        clear(&d, &HashSet::new(), None, None, None, &set(&["local_123"]));
+        assert!(playing.exists() && pmap.exists() && !idle.exists());
+        trim(&d, Policy { limit_mb: 0, keep_days: 0 }, &HashSet::new(), &set(&["local_123"]));
+        assert!(playing.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

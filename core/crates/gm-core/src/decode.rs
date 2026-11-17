@@ -384,6 +384,16 @@ impl Pcm {
         lock(&self.st).done
     }
 
+    /// Tệp WAV còn trên đĩa (xoá đệm / tự dọn / xoá bản tải có thể xoá tệp của bản ghi đang nhớ — dùng lại bản ghi đó thì đọc
+    /// lỗi mãi tới khi mở lại app).
+    pub fn intact(&self) -> bool {
+        if self.is_done() {
+            self.fin.exists()
+        } else {
+            self.part.exists() || self.fin.exists()
+        }
+    }
+
     fn active(st: &PState) -> bool {
         st.readers > 0 || st.last_read.elapsed() < IDLE
     }

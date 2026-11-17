@@ -292,3 +292,75 @@ dựng, giao diện) — ghi ở đây những gì riêng của GramMusic.
   (iOS đã thu hồi cổng); mở app → mở lại đúng cổng 64109 sau 1 ms, bấm phát → phát bình thường. Nằm nền 10 phút mà máy không khoá
   (iPhone 5) thì iOS chưa thu hồi.
 
+
+## M24. Rà soát toàn bộ app, sửa lỗi — bản 1.0.3 — 18/11/2026
+
+- Anh nhờ rà soát cả app tìm lỗi và tự sửa, tự thử, tự phát hành. Rà theo 5 phần (lõi phát / giải mã, lõi dịch vụ / thư viện, mạng,
+  trình phát + tweak, giao diện); mỗi lỗi đọc lại mã cho chắc trước khi sửa, lỗi không tái hiện được trên mã thì bỏ.
+- Lỗi làm app tắt (bản phát hành `panic = abort` — panic nào trong lõi cũng tắt app):
+  - `info.rs`: tệp WAV cụt / lạ (chữ «fmt » sát cuối phần đầu tệp) → cắt mảng quá cỡ. Sửa: `get`.
+  - `lyrics.rs` `main_artist`: tìm dấu ngăn trong chuỗi `to_lowercase` (đổi số byte với «İ»…) rồi cắt chuỗi gốc → cắt giữa ký tự.
+    Sửa: `to_ascii_lowercase` (giữ số byte).
+  - «Chọn nhiều bài» mà danh sách tải lại (tìm, xếp, quét xong…): bảng giữ bố cục cũ, `sections` mới ít hơn → `objectAtIndex`
+    quá cỡ; bài đã chọn đọc lại theo dòng → thao tác nhầm bài. Sửa: lúc chọn thì hoãn tải lại tới khi thôi chọn, khoá ô tìm / nút xếp,
+    bài đã chọn giữ theo khoá.
+  - iPad: bảng thao tác «⋯» (popover) còn mở khi bấm «Quay lại» → delegate đã giải phóng. Sửa: đóng bảng khi rời màn, bỏ delegate
+    khi giải phóng.
+  - Khung lời: bài đang chờ thông tin (khoá nil) mà bấm «Bật» lời → `dictionaryWithObject:nil`. Sửa: không tải khi chưa có khoá, bỏ
+    kết quả của bài trước.
+- Mất nhạc / phát sai:
+  - Opus: đọc lỗi (mạng mất lúc chờ khúc) bị coi là hết tệp → phần còn lại ghi thành im lặng và nhớ luôn. Sửa: lỗi đọc báo lên (chữ
+    «đọc tệp lỗi» như FLAC — stream.rs giữ kết nối chờ mạng, M22); gói Opus hỏng giới hạn 128 KB.
+  - Xoá đệm / tự dọn / xoá bản tải xoá tệp mà lõi vẫn nhớ bản giải (Pcm) / bài (Track) → đọc lỗi mãi tới khi mở lại app. Sửa:
+    chỉ dùng lại khi tệp còn trên đĩa; `forget` bỏ cả bản giải.
+  - Bản giải của tệp trên máy (`local_<băm>.pcm.wav`) không có khoá `<peer>_<id>` → «Xoá đệm» không biết đang dùng. Sửa: so cả
+    theo tên tệp.
+  - Hai yêu cầu cùng lúc (play.ready + GET của AVPlayer) mở hai bản giải cùng một bài, hai luồng ghi đè một tệp. Sửa: một lượt mở
+    mỗi bài. Track còn có luồng giải cầm thì không bỏ khỏi bảng (không mở bản thứ hai).
+  - **WAV gốc trên Telegram** (gửi dạng tài liệu, không có thời lượng): sau dữ liệu âm thanh có chunk thông tin ~1,3 MB (ảnh bìa
+    ID3); iOS đọc phần đó trước khi phát, lõi chỉ trả 1 MB cuối, phần còn lại chờ nhịp nghe → iOS chờ ~19 giây rồi lỗi -1001,
+    bỏ bài (5 lần trong nhật ký iPhone 5 từ trước 1.0.2). Thêm: không có thời lượng thì lõi ước 64 KB/s (WAV thật 176 KB/s) → phát
+    được ~30 giây là đứng. Sửa (`RawMeta`): đọc phần đầu tệp — bitrate thật (chỉ phần âm thanh / thời lượng) và chỗ bắt đầu phần
+    thông tin sau dữ liệu (WAV: chunk sau «data»; M4A: moov sau mdat) — phần đó trả luôn.
+  - Mở giữa bài (Nghe tiếp, dựng lại trình phát, -1004): gắn item xong là `play` → nghe đầu bài trong lúc chờ dữ liệu ở chỗ cần tua.
+    Tua ngay lúc item vừa sẵn sàng (dữ liệu có sẵn) có khi bị AVPlayer bỏ qua → nghe đầu bài 3–4 giây rồi mới nhảy. Sửa: mở giữa
+    bài thì chưa phát; tua bằng `seekToTime:completionHandler:` (iOS 5), xong mới phát, chưa tới chỗ thì tua lại (tối đa 2 lần).
+  - `dropCurrent`: `removeAllItems` khi `_curItem` còn → KVO currentItem → nil tới ngay, tưởng hết bài → tự sang thêm một bài (bấm
+    bài kế lúc gần hết bài / bài chưa biết độ dài). Sửa: bỏ `_curItem` trước.
+  - Hẹn giờ «Hết bài này» chỉ xét ở `itemEnded` — KVO hết bài tới trước thì phát thêm một bài. Sửa: xét ở `advanceAfterEnd`.
+  - Hết hàng chờ, tua rồi bấm phát → phát từ đầu (item cũ đã rời trình phát). Sửa: nhớ chỗ, bấm phát mở lại ở đó.
+  - Bị app khác giành tiếng mà iOS không báo hết gián đoạn → app vẫn «đang phát», bấm hai lần mới dừng. Sửa: hết gián đoạn khi người
+    dùng bấm phát / khi có tiếng; `playing` không tính lúc bị gián đoạn.
+  - `mediaServicesReset:` dựng lại trình phát sau 1,5 giây theo ý người dùng *lúc mất dịch vụ* → bấm dừng / tua / sang bài trong lúc
+    đó bị bỏ qua. Sửa: theo `_wantPlay` / `_resumeAt` lúc dựng lại.
+  - Sang bài bằng nút màn hình khoá / tai nghe khi app ở nền: không xin thêm giờ chạy (như khi hết bài) → có thể bị treo trước khi có
+    tiếng. Sửa: `holdBackground` trong `loadCurrent`.
+  - Đang chờ dữ liệu: nút phát / dừng bị ẩn sau vòng quay → không dừng được. Sửa: vòng quay thay hình, nút vẫn bấm được.
+  - Tweak GramLockControl: GramMusic chết khi màn hình khoá đang mở → khung vẫn chạy «đang phát». Sửa: 2 giây hỏi lại iOS một lần.
+- Thư viện / đăng nhập:
+  - «Lấy bài mới» lọc chat theo mốc chung `last_sync` — chat lỗi giữa chừng (FLOOD_WAIT, PEER_UNKNOWN…) bị bỏ hẳn tới khi có tin
+    mới. Sửa: theo mốc của từng chat; FLOOD_WAIT dừng lượt. Quét dở (mạng rớt ở trang 2) → lần sau trang đầu toàn bài đã có, đếm
+    «10 bài đã có» dừng sớm → bỏ sót phần sau mãi. Sửa: có mốc ngày thì đi tới mốc, không đếm.
+  - Kênh nhận theo chuỗi «-100…» → nhóm thường có id bắt đầu bằng 100 bị coi là kênh, tin bị xoá không bao giờ bỏ khỏi thư viện.
+    Sửa: theo cách đánh số Bot API (kênh ≤ −10¹²).
+  - «Mỗi chủ đề thành một playlist»: bấm «Quay lại» giữa chừng → nguồn rỗng = mọi nguồn → playlist gom cả thư viện. Sửa: giữ nguồn từ
+    đầu.
+  - `auth.signIn`: lỗi mạng / FLOOD_WAIT làm mất lượt đăng nhập → «Chưa gửi mã». Sửa: giữ lượt (trừ mã hết hạn); app: mã hết hạn → về
+    bước xin mã; đang kiểm mã / mật khẩu thì khoá «Quay lại».
+  - Phiên bị Telegram huỷ: tệp đã dời nhưng lần lưu sau (app ra nền) ghi lại auth key chết. Sửa: `FileSession::disable`.
+  - `session.json` hỏng → lõi không khởi động, app không dùng được gì. Sửa: dời tệp hỏng sang bên, chạy như chưa đăng nhập.
+  - Ghi tệp (phiên, thư viện): `sync_all` trước khi đổi tên (mất điện / máy treo không còn tệp rỗng); `flush` lỗi thì giữ lại để
+    ghi sau; ghi thư viện ở luồng blocking (`flush_lib`, một lượt một lúc) — không chặn luồng duy nhất của lõi (cổng phát) khi quét
+    kênh lớn.
+- Mạng: tra DNS mã hoá tối đa 5 giây cho một kết nối (connector chỉ cho 10 giây cả tra lẫn nối — chuỗi DNS bị nuốt gói làm proxy
+  không nối được), lần tra chạy riêng để kết quả / máy chủ chậm vẫn được nhớ; MTProxy fake-TLS từ chối → lần sau đo lại giờ (giờ máy
+  vừa được chỉnh thì độ lệch cũ sai, trước đây chờ 6 giờ); giờ máy lùi → bỏ hạn nhớ DNS cũ.
+- App: hàm nhận kết quả / sự kiện của lõi (luồng Rust) bọc `@autoreleasepool` — iOS 5 / 6 không tự có bể cho luồng lạ, mỗi sự kiện
+  (tiến độ tải ~mỗi giây) rò đối tượng tạm. Thông báo nhỏ trong bảng đã cuộn hiện đúng chỗ (cộng `bounds.origin`). Hàng chờ không
+  tải lại dòng ngay trong `cellForRowAtIndexPath:`. Chạm thanh thời gian mà không kéo thì không tua. «Phát tiếp theo» khi chưa phát
+  gì giữ đúng thứ tự đã chọn. Nhật ký không ghi đường dẫn tệp trên máy.
+- Không sửa: thêm tệp `keys/nextdns.txt` sau khi đã dựng (chưa có thư mục `keys/`) thì máy dựng không tự dựng lại `gm-net` — chỉ liên
+  quan máy dựng (máy dựng / PC đều có sẵn `keys/`).
+- Test lõi thêm: `truncated_headers_do_not_panic`, `read_error_is_not_end_of_file` (Opus), `raw_meta_reads_wav_and_m4a`,
+  `raw_wav_tail_metadata_served_without_pace`, `clear_keeps_busy_local_decode`, `main_artist` với «İ», `remove_songs` theo cách
+  đánh số kênh. gm-core 44, gm-net 27.

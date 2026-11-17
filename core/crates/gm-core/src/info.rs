@@ -41,8 +41,8 @@ pub fn parse(ext: &str, head: &[u8]) -> Info {
         }
         "wav" => {
             i.lossless = true;
-            if let Some(j) = find(head, b"fmt ") {
-                let f = &head[j + 8..];
+            // `get`: «fmt » nằm sát cuối phần đầu tệp (tệp cụt / tệp lạ ai đó gửi lên nhóm) — cắt thẳng là panic, app sập
+            if let Some(f) = find(head, b"fmt ").and_then(|j| head.get(j + 8..)) {
                 if f.len() >= 16 {
                     i.channels = Some(u16::from_le_bytes([f[2], f[3]]) as u32);
                     i.rate = Some(u32::from_le_bytes([f[4], f[5], f[6], f[7]]));
@@ -121,7 +121,7 @@ pub fn duration(ext: &str, head: &[u8], tail: &[u8], size: u64) -> Option<f64> {
             (rate > 0 && total > 0).then(|| total as f64 / rate as f64)?
         }
         "wav" => {
-            let f = &head[find(head, b"fmt ")? + 8..];
+            let f = head.get(find(head, b"fmt ")? + 8..)?;
             let byte_rate = u32::from_le_bytes(f.get(8..12)?.try_into().ok()?) as f64;
             let j = find(head, b"data")?;
             let n = u32::from_le_bytes(head.get(j + 4..j + 8)?.try_into().ok()?) as u64;
@@ -266,6 +266,16 @@ mod tests {
         let song = Song { size: 25 << 20, dur: 200, ..Default::default() };
         let v = to_json(&song, &parse("flac", &std::fs::read(format!("{}/tests/data/hires96.flac", env!("CARGO_MANIFEST_DIR"))).unwrap()[..64]));
         assert_eq!((v["kbps"].as_u64(), v["hires"].as_bool()), (Some(1048), Some(true)));
+    }
+
+    #[test]
+    fn truncated_headers_do_not_panic() {
+        // «fmt » sát cuối: trước đây head[j + 8..] panic (bản phát hành panic = abort → app sập)
+        let h = b"RIFF\0\0\0\0WAVEfmt ";
+        assert_eq!(parse("wav", h).rate, None);
+        assert_eq!(duration("wav", h, &[], 16), None);
+        assert_eq!(duration("ogg", b"\x01vorbis", &[], 7), None);
+        assert_eq!(parse("mp3", b"ID3\x04\0\0\x7f\x7f\x7f\x7f").rate, None);
     }
 
     #[test]

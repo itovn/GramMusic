@@ -22,6 +22,16 @@ static OFFSET_MS: AtomicI64 = AtomicI64::new(0);
 static SYNCED: AtomicBool = AtomicBool::new(false);
 /// Lần đo gần nhất: (lúc nào, có được không).
 static LAST: Mutex<Option<(Instant, bool)>> = Mutex::const_new(None);
+/// MTProxy vừa từ chối giờ đã ký: độ lệch đo được tính theo giờ máy lúc đo, giờ máy được chỉnh sau đó (Đặt tự động / anh chỉnh
+/// tay) thì độ lệch cũ thành sai — đo lại ở lần kết nối sau thay vì chờ hết 6 giờ.
+static STALE: AtomicBool = AtomicBool::new(false);
+/// Đo lại sau khi bị từ chối, nhưng không dày hơn ngần này (mạng chặn UDP 123 thì mỗi lần đo mất tới 6 giây).
+const STALE_RETRY: Duration = Duration::from_secs(60);
+
+/// Proxy từ chối bắt tay (có thể do giờ): lần sau đo lại giờ.
+pub fn mark_stale() {
+    STALE.store(true, Ordering::Relaxed);
+}
 
 fn system_unix() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
@@ -69,10 +79,18 @@ async fn query(server: &str) -> std::io::Result<i64> {
 pub async fn ensure_synced() -> Option<i64> {
     let mut last = LAST.lock().await;
     if let Some((t, ok)) = *last {
-        if t.elapsed() < if ok { MAX_AGE } else { RETRY_AFTER_FAIL } {
+        let max = if STALE.load(Ordering::Relaxed) {
+            STALE_RETRY
+        } else if ok {
+            MAX_AGE
+        } else {
+            RETRY_AFTER_FAIL
+        };
+        if t.elapsed() < max {
             return offset_ms();
         }
     }
+    STALE.store(false, Ordering::Relaxed);
     for s in SERVERS {
         if let Ok(Ok(ms)) = tokio::time::timeout(PER_SERVER, query(s)).await {
             set_offset_ms(ms);

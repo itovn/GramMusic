@@ -243,6 +243,7 @@ static NSString *glc_time(double t) {
     UISlider *_slider;
     UIButton *_prev, *_play, *_next;
     NSTimer *_timer;
+    NSUInteger _ticks;
     BOOL _dragging;
     BOOL _hasLines;
 }
@@ -379,6 +380,12 @@ static NSString *glc_text(NSArray *lines, NSInteger i) {
 - (void)tick {
     if (!self.window || self.hidden) {
         [self stop];
+        return;
+    }
+    // GramMusic chết (iPad 1 hết RAM…) / app khác giành phát lúc màn hình khoá đang mở: tệp trạng thái vẫn ghi «đang phát» — 2 giây
+    // hỏi lại iOS một lần, thôi thì ẩn khung
+    if (++_ticks % 4 == 0 && !glc_shouldShow()) {
+        [self refresh];
         return;
     }
     id aw = glc_away();

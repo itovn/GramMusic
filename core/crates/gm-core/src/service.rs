@@ -225,6 +225,8 @@ pub struct Core {
     sync_info: Mutex<Value>,
     /// Khoá peer của tài khoản (Tin nhắn đã lưu).
     me: Mutex<Option<String>>,
+    /// Một lượt ghi thư viện một lúc (flush_lib): bản lấy ra trước ghi trước — không để bản cũ đè bản mới.
+    flush_gate: tokio::sync::Mutex<()>,
 }
 
 impl Core {
@@ -296,6 +298,7 @@ impl Core {
             sync_pending: Mutex::new(Vec::new()),
             sync_info: Mutex::new(json!({"running": false})),
             me: Mutex::new(me),
+            flush_gate: tokio::sync::Mutex::new(()),
         });
         core.log(&format!("mở lõi, proxy: {:?}", core.conn.config()));
         let weak = Arc::downgrade(&core);
@@ -388,6 +391,9 @@ impl Core {
         if self.dead.swap(true, Ordering::SeqCst) {
             return true;
         }
+        // Thôi ghi phiên trước khi dời tệp: phiên trong bộ nhớ vẫn giữ auth key chết, lần lưu sau (app.flush lúc ra nền…) sẽ tạo lại
+        // session.json → mở lại app lại AUTH_KEY_DUPLICATED
+        self.session.disable();
         let from = self.cfg.data_dir.join("session.json");
         let to = self.cfg.data_dir.join(format!("session.dead-{}.json", now()));
         let moved = std::fs::rename(&from, &to).is_ok();
@@ -612,7 +618,9 @@ impl Core {
                 if all { ", trả hết một lần" } else { "" }
             ));
             let mut caught_up = false;
-            if !full {
+            // Đếm bài đã có chỉ khi không có mốc ngày: lần trước dở giữa chừng (mạng rớt ở trang 2) thì trang đầu toàn bài đã có —
+            // dừng ở đó là bỏ sót phần sau mãi; có mốc thì đi tới mốc
+            if !full && since == 0 {
                 for k in known {
                     if overlap.see(k) {
                         caught_up = true;
@@ -637,7 +645,7 @@ impl Core {
             pages_since_flush += 1;
             if pages_since_flush >= 5 {
                 pages_since_flush = 0;
-                lock(&self.lib).flush()?;
+                self.flush_lib().await?;
                 if peer.is_none() && full {
                     st.phase = phase.to_string();
                     st.cursor = cur.clone();
@@ -654,7 +662,7 @@ impl Core {
             // Nhịp hỏi nhẹ tay (tránh FLOOD_WAIT)
             tokio::time::sleep(Duration::from_millis(120)).await;
         }
-        lock(&self.lib).flush()?;
+        self.flush_lib().await?;
         Ok(())
     }
 
@@ -777,17 +785,19 @@ impl Core {
             st.full_done = true;
             st.version = crate::sync::VERSION;
         } else {
-            let since = st.last_sync - 86_400;
+            // Theo mốc của từng chat (lần quét chat đó xong), không theo mốc chung: chat lỗi giữa chừng (FLOOD_WAIT, PEER_UNKNOWN…)
+            // giữ mốc cũ nên lần sau quét lại — mốc chung đã dời tới nay thì chat đó bị bỏ hẳn tới khi có tin mới
             let todo: Vec<String> = dialogs
                 .iter()
-                .filter(|(p, date)| *date >= since || !st.chats.contains_key(p.as_str()))
+                .filter(|(p, date)| st.chats.get(p.as_str()).is_none_or(|&t| *date >= t - 86_400))
                 .map(|(p, _)| p.clone())
                 .collect();
             st.chat_n = todo.len();
             for (i, peer) in todo.iter().enumerate() {
                 st.chat_i = i + 1;
                 if let Err(e) = Box::pin(self.sync_chat(peer, false, st, found)).await {
-                    if matches!(e.code.as_str(), "STOPPED" | "NETWORK" | "TIMEOUT") {
+                    // FLOOD_WAIT dài: chat sau cũng sẽ bị — dừng lượt (như quét toàn bộ), lần sau quét tiếp theo mốc từng chat
+                    if matches!(e.code.as_str(), "STOPPED" | "NETWORK" | "TIMEOUT" | "FLOOD_WAIT") {
                         return Err(e);
                     }
                     self.log(&format!("quét chat: lỗi {} — bỏ qua", e.code));
@@ -823,10 +833,12 @@ impl Core {
             Box::pin(self.scan_phase(Some(&pr), phase, Cursor::default(), deep, since, st, found)).await?;
         }
         st.chats.insert(peer.to_string(), now());
-        let mut lib = lock(&self.lib);
-        lib.set_complete(peer, true);
-        let _ = lib.update_source(peer, |s| s.synced = now());
-        lib.flush()?;
+        {
+            let mut lib = lock(&self.lib);
+            lib.set_complete(peer, true);
+            let _ = lib.update_source(peer, |s| s.synced = now());
+        }
+        self.flush_lib().await?;
         Ok(())
     }
 
@@ -1105,6 +1117,34 @@ impl Core {
             .map_err(|e| CoreError::new("IO", format!("ghi cài đặt: {e}")))
     }
 
+    /// Ghi các chỉ mục nguồn có bài mới xuống đĩa ở luồng blocking (ghi + sync tệp vài MB của kênh lớn không chặn luồng duy nhất
+    /// của lõi — cổng phát nhạc, mọi lệnh của app). Lỗi thì giữ lại để lần sau ghi.
+    async fn flush_lib(&self) -> Result<(), CoreError> {
+        let _g = self.flush_gate.lock().await;
+        let jobs = lock(&self.lib).take_unsaved();
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        let failed = tokio::task::spawn_blocking(move || {
+            let mut failed = Vec::new();
+            let mut first: Option<std::io::Error> = None;
+            for (peer, path, bytes) in jobs {
+                if let Err(e) = crate::library::write_atomic(&path, &bytes) {
+                    failed.push(peer);
+                    first.get_or_insert(e);
+                }
+            }
+            (failed, first)
+        })
+        .await
+        .map_err(|e| CoreError::new("IO", e.to_string()))?;
+        if let (peers, Some(e)) = failed {
+            lock(&self.lib).mark_unsaved(peers);
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
     fn save_session(&self) {
         if let Err(e) = self.session.save() {
             self.log(&format!("ghi phiên: {e}"));
@@ -1129,12 +1169,8 @@ impl Core {
                     Ok(Ok(Update::NewMessage(m))) | Ok(Ok(Update::MessageEdited(m))) => {
                         let key = peer_key(m.peer_id());
                         if let Some(song) = media::song_from(&m, &key) {
-                            let n = {
-                                let mut lib = lock(&c.lib);
-                                let n = lib.add_songs(&key, vec![song], || c.source_for(&m, &key)).unwrap_or(0);
-                                let _ = lib.flush();
-                                n
-                            };
+                            let n = lock(&c.lib).add_songs(&key, vec![song], || c.source_for(&m, &key)).unwrap_or(0);
+                            let _ = c.flush_lib().await;
                             if n > 0 {
                                 c.library_changed();
                             }
@@ -1143,6 +1179,7 @@ impl Core {
                     Ok(Ok(Update::MessageDeleted(d))) => {
                         let ch = d.channel_id().and_then(PeerId::channel).map(peer_key);
                         let n = lock(&c.lib).remove_songs(ch.as_deref(), d.messages());
+                        let _ = c.flush_lib().await;
                         if n > 0 {
                             c.library_changed();
                         }
@@ -1256,8 +1293,10 @@ impl Core {
         let v = crate::lyrics::to_result(rec.as_ref());
         let _ = std::fs::create_dir_all(&dir);
         let _ = crate::library::write_atomic(&path, v.to_string().as_bytes());
+        // Tệp trên máy: khoá là đường dẫn (thường «Ca sĩ - Tên bài») — không ghi vào nhật ký
+        let shown = if key.starts_with("file:") || key.starts_with("ipod:") { "(bài trên máy)" } else { key.as_str() };
         self.log(&format!(
-            "lời bài hát {key}: {} ({} ms)",
+            "lời bài hát {shown}: {} ({} ms)",
             if v["synced"] == true {
                 "lời chạy"
             } else if v["instrumental"] == true {
@@ -1320,7 +1359,14 @@ impl Core {
                         "SIGN_UP_REQUIRED",
                         "Số này chưa có tài khoản Telegram — đăng ký bằng app Telegram chính thức trước.",
                     )),
-                    Err(SignInError::Other(e)) => Err(e.into()),
+                    Err(SignInError::Other(e)) => {
+                        // Lỗi mạng / FLOOD_WAIT…: giữ lượt đăng nhập để thử lại đúng mã đó (trước đây mất luôn → «Chưa gửi mã», phải
+                        // xin mã mới — dễ dính FLOOD_WAIT ở sendCode); mã hết hạn thì app về bước xin mã
+                        if !e.is("PHONE_CODE_EXPIRED") {
+                            *lock(&self.login) = Some(token);
+                        }
+                        Err(e.into())
+                    }
                     Err(e) => Err(CoreError::new("SIGN_IN", e.to_string())),
                 }
             }
@@ -1389,7 +1435,7 @@ impl Core {
             "net.check" => Ok(json!({"ok": self.check_net().await})),
             "app.flush" => {
                 self.save_session();
-                lock(&self.lib).flush()?;
+                self.flush_lib().await?;
                 Ok(json!({}))
             }
 

@@ -80,6 +80,8 @@ typedef enum { GMLyNone, GMLyLoading, GMLyOff, GMLyFailed } GMLyState;
     _cur = -1;
     [_table reloadData];
     if (!key) {
+        // Bài đang chờ thông tin: bỏ kết quả của lần tìm lời đang chạy cho bài trước
+        _req++;
         [self state:GMLyLoading text:@""];
         return;
     }
@@ -101,6 +103,7 @@ typedef enum { GMLyNone, GMLyLoading, GMLyOff, GMLyFailed } GMLyState;
 
 - (void)load:(BOOL)refresh {
     NSString *key = _key;
+    if (!key) return;
     NSUInteger req = ++_req;
     [self state:GMLyLoading text:@"Đang tìm lời…"];
     NSMutableDictionary *args = [NSMutableDictionary dictionaryWithObject:key forKey:@"key"];

@@ -179,8 +179,11 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
         AudioSessionRemovePropertyListenerWithUserData(kAudioSessionProperty_AudioRouteChange, GMRouteChanged, NULL);
         AudioSessionAddPropertyListener(kAudioSessionProperty_AudioRouteChange, GMRouteChanged, NULL);
         [self makePlayer];
-        if (play) [self holdBackground];
-        if ([self currentKey]) [self loadCurrent:play at:at];
+        // Theo ý người dùng lúc này, không phải lúc mất dịch vụ: trong 1,5 giây chờ có thể đã bấm dừng / tua / sang bài (vị trí mới
+        // ở _resumeAt — seek / loadCurrent ghi vào đó khi chưa có item)
+        BOOL go = _wantPlay;
+        if (go) [self holdBackground];
+        if ([self currentKey]) [self loadCurrent:go at:_resumeAt];
         else [self notify];
     });
 }
@@ -239,7 +242,8 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
 }
 
 - (BOOL)playing {
-    return _wantPlay;
+    // Bị app khác giành tiếng (iOS 5 / 6 nhiều khi không báo hết gián đoạn): không hiện «đang phát» khi đang im
+    return _wantPlay && !_interrupted;
 }
 
 - (BOOL)buffering {
@@ -280,7 +284,9 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
         [miss addObject:k];
     }
     if (!miss.count) {
-        if (done) done();
+        // Luôn gọi sau (như khi hỏi lõi): bên gọi là cellForRowAtIndexPath: của hàng chờ — tải lại dòng ngay trong lúc bảng đang
+        // dựng ô là lỗi
+        if (done) dispatch_async(dispatch_get_main_queue(), done);
         return;
     }
     [GMCore call:@"library.songs" args:@{@"keys": miss} done:^(id ok, NSDictionary *err) {
@@ -336,9 +342,12 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
 
 - (void)dropCurrent {
     [self dropNext];
-    [_player removeAllItems];
-    [self unwatch:_curItem];
+    // Bỏ _curItem trước removeAllItems: KVO currentItem → nil tới ngay trong lúc gọi, currentItemChanged tưởng hết bài (bấm bài kế
+    // lúc gần hết bài / bài chưa biết độ dài) rồi tự sang thêm một bài nữa
+    AVPlayerItem *old = _curItem;
     _curItem = nil;
+    [self unwatch:old];
+    [_player removeAllItems];
     _curKey = nil;
     _curDur = 0;
     [self cancelSeek];
@@ -387,6 +396,8 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
         [self notify];
         return;
     }
+    // Sang bài bằng nút màn hình khoá / tai nghe lúc app ở nền: giữ app chạy tới khi có tiếng (như advanceAfterEnd — TubeMini D34)
+    if (play) [self holdBackground];
     NSDictionary *info = [_info objectForKey:key];
     if (!info) {
         [self notify];
@@ -430,7 +441,9 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
             _obsAt = 0;
             [self watch:item];
             [_player insertItem:item afterItem:nil];
-            if (_wantPlay) [_player play];
+            // Mở giữa bài: chưa phát (phát là chạy từ 0 trong lúc chờ dữ liệu ở chỗ cần tua tới) — sẵn sàng thì seekWhenReady tua rồi
+            // mới phát (M22)
+            if (_wantPlay && !(_resumeAt > 1)) [_player play];
             GMLog(@"phát: có URL sau %lld ms, nạp tệp %lld ms (nền), gắn item %lld ms (đệm %.0f%%)", tu - t0, ti - tu, GMNowMs() - ti,
                   cached * 100);
             _readyT0 = GMNowMs();
@@ -590,11 +603,15 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
     } else if (ctx == kItemKeepUp) {
         AVPlayerItem *item = obj;
         // Hết chờ dữ liệu (mạng chậm, vừa tua): phát tiếp nếu người dùng vẫn muốn phát
-        if (item == _curItem && item.playbackLikelyToKeepUp && _wantPlay && _rate == 0 && !_interrupted && !_seekHold) [_player play];
+        if (item == _curItem && item.playbackLikelyToKeepUp && _wantPlay && _rate == 0 && !_interrupted && !_seekHold &&
+            !(_resumeAt > 1)) {
+            [_player play];
+        }
         [self notify];
     } else if (ctx == kPlayerRate) {
         // Đọc ngay lúc trình phát báo đổi; chỗ khác dùng bản giữ lại
         _rate = _player.rate;
+        if (_rate > 0) _interrupted = NO;  // đang có tiếng: hết gián đoạn (iOS không phải lúc nào cũng báo endInterruption)
         [self updateNowPlaying];
         [self notify];
     } else if (ctx == kPlayerItem) {
@@ -654,11 +671,6 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
         return;
     }
     if (n.object != _curItem) return;
-    if (_sleepEnd) {
-        _sleepEnd = NO;
-        _wantPlay = NO;
-        [_player pause];
-    }
     // Có bài nạp sẵn còn tốt: AVQueuePlayer tự sang (currentItemChanged)
     if (_nextItem && _nextItem.status != AVPlayerItemStatusFailed && _wantPlay) return;
     [self advanceAfterEnd];
@@ -666,6 +678,12 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
 
 /// Hết bài, không có bài nạp sẵn: mở bài kế (giữ app chạy ở nền tới khi có tiếng), hoặc dừng nếu hết hàng chờ.
 - (void)advanceAfterEnd {
+    // Hẹn giờ «Hết bài này» — ở đây chứ không chỉ ở itemEnded: KVO currentItem → nil có thể tới trước thông báo hết bài
+    if (_sleepEnd) {
+        _sleepEnd = NO;
+        _wantPlay = NO;
+        [_player pause];
+    }
     [self dropNext];
     NSInteger next = [self nextIndexAuto];
     if (next < 0 || !_wantPlay) {
@@ -743,12 +761,13 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
 }
 
 - (void)togglePlay {
-    if (_wantPlay) [self pause];
+    if (self.playing) [self pause];
     else [self play];
 }
 
 - (void)play {
     if (![self currentKey]) return;
+    _interrupted = NO;  // người dùng bấm phát: hết gián đoạn dù iOS chưa báo
     [[AVAudioSession sharedInstance] setActive:YES error:NULL];
     if (!_curItem || _ended || _curItem.status == AVPlayerItemStatusFailed) {
         [self loadCurrent:YES at:_ended ? 0 : _resumeAt];
@@ -765,7 +784,8 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
     void (^go)(void) = ^{
         if (went) return;
         went = YES;
-        if (gen == _gen && _wantPlay && !_seekHold) [_player play];  // đang chờ tua (mở giữa bài): tua xong tự phát
+        // đang chờ tua (mở giữa bài, item chưa sẵn sàng / đang chờ dữ liệu): tua xong tự phát
+        if (gen == _gen && _wantPlay && !_seekHold && !(_curItem && _resumeAt > 1)) [_player play];
     };
     [GMCore call:@"stream.revive" args:@{} done:^(id ok, NSDictionary *err) {
         if ([[ok objectForKey:@"revived"] boolValue]) GMLog(@"phát: cổng phát bị iOS thu hồi lúc nằm nền — đã mở lại cổng %@", [ok objectForKey:@"port"]);
@@ -807,6 +827,14 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
     // Tua lúc app ở nền tới chỗ chưa có dữ liệu → tiếng tạm dừng → iOS 6 treo app ngay (không phát lại được): giữ app chạy tới khi
     // có tiếng (hết giờ tự trả — endBackgroundTask khi item sẵn sàng / phát tiếp)
     if (_wantPlay) [self holdBackground];
+    if (_ended) {
+        // Hết hàng chờ: item cũ đã rời trình phát, tua vào đó không có tác dụng — nhớ chỗ, bấm phát thì mở lại bài ở đó
+        _ended = NO;
+        [self dropCurrent];
+        _resumeAt = MAX(0, t);
+        [self notify];
+        return;
+    }
     if (!_curItem || _curItem.status != AVPlayerItemStatusReadyToPlay) {
         _resumeAt = t;
         return;
@@ -835,22 +863,39 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
     long long t0 = GMNowMs();
     void (^go)(void) = ^{
         if (sg != _seekGen || item != _curItem) return;
-        _seekTo = -1;
-        _seekHold = NO;
-        [_player seekToTime:CMTimeMakeWithSeconds(t, 1000)];
-        _obsPos = t;
-        _obsAt = 0;
-        if (_wantPlay) [_player play];
         if (GMNowMs() - t0 > 1500) GMLog(@"phát: có dữ liệu ở %.0f giây sau %lld ms — tua", t, GMNowMs() - t0);
-        [self reportPace];
-        [self updateNowPlaying];
-        [self notify];
+        [self seekItem:item to:t gen:sg tries:0];
     };
     if (!key || [GMLocalMusic isIPodKey:key]) {
         go();  // bài app Nhạc: tệp trên máy
         return;
     }
     [self waitData:key at:t gen:sg then:go];
+}
+
+/// Tua thật, chờ AVPlayer báo xong rồi mới bỏ «đang tua» và phát. Tua ngay lúc item vừa sẵn sàng (dữ liệu có sẵn — WAV gốc đã đệm)
+/// có khi bị AVPlayer bỏ qua: trước đây phát luôn → nghe đầu bài 3–4 giây rồi mới nhảy tới chỗ cũ. Chưa xong / chưa tới chỗ → tua
+/// lại (tối đa 2 lần). Trong lúc chờ: vị trí vẫn hiện `t` (_seekTo), mở giữa bài thì chưa phát (_seekHold).
+- (void)seekItem:(AVPlayerItem *)item to:(double)t gen:(NSInteger)sg tries:(NSInteger)tries {
+    [_player seekToTime:CMTimeMakeWithSeconds(t, 1000) completionHandler:^(BOOL finished) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (sg != _seekGen || item != _curItem) return;  // đã tua chỗ khác / đổi bài
+            double now = finished ? CMTimeGetSeconds(_player.currentTime) : -1;
+            if ((!finished || !(fabs(now - t) < 3)) && tries < 2) {
+                GMLog(@"phát: tua tới %.0f giây chưa xong (%@) — tua lại", t, finished ? [NSString stringWithFormat:@"đang ở %.1f", now] : @"bị huỷ");
+                [self seekItem:item to:t gen:sg tries:tries + 1];
+                return;
+            }
+            _seekTo = -1;
+            _seekHold = NO;
+            _obsPos = t;
+            _obsAt = 0;
+            if (_wantPlay) [_player play];
+            [self reportPace];
+            [self updateNowPlaying];
+            [self notify];
+        });
+    }];
 }
 
 /// Hỏi lõi tới khi có dữ liệu ở giây `t` (mỗi lần chờ tối đa 20 giây; lỗi hẳn thì tua luôn — AVPlayer tự báo lỗi).

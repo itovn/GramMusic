@@ -339,7 +339,9 @@ static NSString *GMKindText(NSString *k) {
 /// Tạo (hoặc bổ sung) playlist «Nhóm · Chủ đề» cho từng chủ đề, lần lượt.
 - (void)saveAll {
     NSArray *topics = _topics;
-    if (!topics.count) return;
+    // Giữ nguồn từ đầu: bấm «Quay lại» giữa chừng thì ws = nil — source "" là mọi nguồn, playlist sẽ gom cả thư viện
+    NSString *peer = self.peer;
+    if (!topics.count || !peer.length) return;
     _saveAll.enabled = NO;
     __block NSInteger i = 0, made = 0;
     __block void (^step)(void);
@@ -356,7 +358,7 @@ static NSString *GMKindText(NSString *k) {
         }
         NSDictionary *t = [topics objectAtIndex:i++];
         NSString *name = [NSString stringWithFormat:@"%@ · %@", group, GMVal(t, @"title")];
-        [GMCore call:@"pl.fromQuery" args:@{@"name": name, @"source": ws.peer ?: @"", @"topic": GMVal(t, @"id") ?: @1, @"sort": @"date"}
+        [GMCore call:@"pl.fromQuery" args:@{@"name": name, @"source": peer, @"topic": GMVal(t, @"id") ?: @1, @"sort": @"date"}
                 done:^(id ok, NSDictionary *err) {
                     if (!err) made++;
                     if (step) step();

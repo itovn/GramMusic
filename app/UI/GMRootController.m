@@ -62,6 +62,7 @@ GMRootController *GMRoot(void) {
         _spin = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:
                  [GMTheme dark] ? UIActivityIndicatorViewStyleWhite : UIActivityIndicatorViewStyleGray];
         _spin.hidesWhenStopped = YES;
+        _spin.userInteractionEnabled = NO;  // chạm xuyên xuống nút phát / dừng bên dưới
         [self addSubview:_spin];
         _bar = [[UIView alloc] init];
         _bar.backgroundColor = [[GMTheme accent] colorWithAlphaComponent:0.18];
@@ -109,8 +110,8 @@ GMRootController *GMRoot(void) {
     BOOL busy = p.playing && p.buffering;
     if (busy) [_spin startAnimating];
     else [_spin stopAnimating];
-    _play.hidden = busy;
-    [_play setImage:[GMArt glyph:p.playing ? @"pause" : @"play" size:24 color:[GMTheme text]] forState:UIControlStateNormal];
+    // Đang chờ dữ liệu: vòng quay thay hình nút, nút vẫn bấm được (mạng chậm có thể chờ lâu — vẫn phải dừng được)
+    [_play setImage:busy ? nil : [GMArt glyph:p.playing ? @"pause" : @"play" size:24 color:[GMTheme text]] forState:UIControlStateNormal];
     double d = p.duration;
     double f = d > 0 ? MIN(1, p.position / d) : 0;
     _barFill.frame = CGRectMake(0, 0, floor(_bar.bounds.size.width * f), 2);

@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -149,12 +149,25 @@ fn log(msg: &str) {
     }
 }
 
+/// Giờ máy (ms) lần gọi trước — để biết giờ máy bị lùi.
+static LAST_NOW: AtomicI64 = AtomicI64::new(0);
+/// Giờ máy vừa lùi (anh chỉnh tay / máy lấy lại giờ đúng sau khi chạy giờ tương lai): mọi hạn nhớ (địa chỉ đã tra, máy chủ đang
+/// nghỉ, NextDNS gần nhất) tính theo giờ cũ thành dài bất thường — bỏ ở lần tra sau (`resolve_with`, ngoài mọi khoá).
+static CLOCK_BACK: AtomicBool = AtomicBool::new(false);
+
 fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    let prev = LAST_NOW.swap(t, Ordering::Relaxed);
+    if t + 60_000 < prev {
+        CLOCK_BACK.store(true, Ordering::Relaxed);
+    }
+    t
 }
 
 const CONNECT_MS: u64 = 2_500;
 const READ_MS: u64 = 3_000;
+/// Chờ chuỗi DNS mã hoá tối đa ngần này cho một kết nối (for_connect).
+const RESOLVE_MS: u64 = 5_000;
 const DOWN_MS: i64 = 120_000;
 const IDLE_MS: i64 = 90_000;
 const MAX_IDLE: usize = 4;
@@ -221,6 +234,12 @@ static INFLIGHT: LazyLock<Mutex<HashMap<String, Cell>>> = LazyLock::new(Default:
 
 /// Như `resolve`, với chuỗi máy chủ riêng (test).
 pub async fn resolve_with(host: &str, servers: Arc<Vec<Server>>) -> io::Result<Option<IpAddr>> {
+    now_ms();
+    if CLOCK_BACK.swap(false, Ordering::Relaxed) {
+        clear_cache();
+        lock(&POPS).1 = 0;
+        log("dns: giờ máy vừa lùi — bỏ các hạn nhớ cũ");
+    }
     let name = clean(host);
     if name.parse::<IpAddr>().is_ok() || name == "localhost" {
         return Ok(None);
@@ -549,10 +568,22 @@ pub fn blocked(a: &IpAddr) -> bool {
 /// Địa chỉ cho một kết nối lõi tự phân giải: qua DNS mã hoá nếu bật; Ok(None) = dùng DNS của máy như thường. Tên miền không có
 /// (DNS mã hoá trả NXDOMAIN) → Err(NotFound).
 pub async fn for_connect(host: &str) -> io::Result<Option<IpAddr>> {
-    if enabled() {
-        resolve(host).await
-    } else {
-        Ok(None)
+    if !enabled() {
+        return Ok(None);
+    }
+    // Chuỗi DNS mã hoá có thể chậm cả chục giây (máy chủ bị chặn kiểu nuốt gói: mỗi máy chủ chờ 2,5 s + 3 s + 3 s, cộng dò NextDNS
+    // gần nhất) — bên gọi (connector / socks5) chỉ cho 10 giây cả tra lẫn nối, nên chờ tối đa RESOLVE_MS rồi dùng DNS của máy. Lần
+    // tra chạy riêng nên vẫn chạy tiếp khi bên gọi thôi chờ: máy chủ chậm được đánh dấu nghỉ, dò NextDNS xong vẫn nhớ, địa chỉ tra
+    // được vẫn nhớ cho lần sau (bị huỷ giữa chừng thì lần nào cũng dò lại từ đầu, lần nào cũng hết giờ).
+    let name = host.to_string();
+    let job = tokio::spawn(async move { resolve(&name).await });
+    match tokio::time::timeout(Duration::from_millis(RESOLVE_MS), job).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => Ok(None),
+        Err(_) => {
+            log(&format!("dns: {} — DNS mã hoá chưa trả lời sau {} s, dùng DNS của máy", clean(host), RESOLVE_MS / 1000));
+            Ok(None)
+        }
     }
 }
 

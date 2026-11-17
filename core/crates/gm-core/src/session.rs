@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use grammers_session::storages::MemorySession;
@@ -33,6 +35,8 @@ pub struct FileSession {
     mem: MemorySession,
     path: PathBuf,
     state: Mutex<State>,
+    /// Phiên đã chết (Telegram huỷ — tệp đã dời đi): không ghi lại nữa, kẻo auth key chết quay về `session.json`.
+    off: AtomicBool,
 }
 
 impl FileSession {
@@ -41,8 +45,18 @@ impl FileSession {
         let path = path.as_ref().to_path_buf();
         let mut data = SessionData::default();
         if path.exists() {
-            let snap: Snapshot = serde_json::from_slice(&std::fs::read(&path)?)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("tệp phiên hỏng: {e}")))?;
+            let snap: Snapshot = match serde_json::from_slice(&std::fs::read(&path)?) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Tệp hỏng (mất điện giữa lúc ghi…): dời sang bên, chạy như chưa đăng nhập — trước đây lõi không khởi động được,
+                    // app mở ra không dùng được gì (cả bài đã tải về máy) và không có cách nào tự sửa
+                    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    let bad = path.with_file_name(format!("session.bad-{secs}.json"));
+                    let _ = std::fs::rename(&path, &bad);
+                    eprintln!("tệp phiên hỏng ({e}) — dời sang {}, cần đăng nhập lại", bad.display());
+                    Snapshot::default()
+                }
+            };
             data.home_dc = snap.home_dc;
             for o in snap.dc_options {
                 data.dc_options.insert(o.id, o);
@@ -59,7 +73,12 @@ impl FileSession {
             peers: data.peer_infos.clone(),
             dirty: false,
         };
-        Ok(Self { mem: MemorySession::from(data), path, state: Mutex::new(state) })
+        Ok(Self { mem: MemorySession::from(data), path, state: Mutex::new(state), off: AtomicBool::new(false) })
+    }
+
+    /// Thôi ghi tệp (phiên chết — xem `off`).
+    pub fn disable(&self) {
+        self.off.store(true, Ordering::SeqCst);
     }
 
     /// Ghi tệp nếu có thay đổi chưa ghi.
@@ -73,6 +92,9 @@ impl FileSession {
     }
 
     fn write(&self, st: &State) -> io::Result<()> {
+        if self.off.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let snap = Snapshot {
             home_dc: st.home_dc,
             dc_options: st.dc_options.values().cloned().collect(),
@@ -81,7 +103,12 @@ impl FileSession {
         };
         let bytes = serde_json::to_vec(&snap).map_err(io::Error::other)?;
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, bytes)?;
+        {
+            // sync trước khi đổi tên: mất điện / máy treo ngay sau đó thì vẫn là tệp cũ hoặc tệp mới đủ, không phải tệp rỗng
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

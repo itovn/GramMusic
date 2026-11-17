@@ -39,6 +39,7 @@ static UIBarButtonItem *GMGlyphItem(NSString *glyph, id target, SEL action) {
     MPVolumeView *_volume;
     NSString *_key;
     BOOL _dragging;
+    BOOL _slid;  // thanh thời gian thật sự bị kéo (chạm rồi thả không kéo: không tua)
     UIView *_chips;        // ô thông số tệp: định dạng · tần số · bit · bitrate · cỡ
     NSString *_infoKey;
     NSInteger _infoTries;
@@ -113,6 +114,7 @@ static UIBarButtonItem *GMGlyphItem(NSString *glyph, id target, SEL action) {
     _spin = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:
              [GMTheme dark] ? UIActivityIndicatorViewStyleWhiteLarge : UIActivityIndicatorViewStyleGray];
     _spin.hidesWhenStopped = YES;
+    _spin.userInteractionEnabled = NO;  // chạm xuyên xuống nút phát / dừng bên dưới
     [self.view addSubview:_spin];
 
     _volume = [[MPVolumeView alloc] init];
@@ -256,8 +258,8 @@ static UIBarButtonItem *GMGlyphItem(NSString *glyph, id target, SEL action) {
     BOOL busy = p.playing && p.buffering;
     if (busy) [_spin startAnimating];
     else [_spin stopAnimating];
-    _play.hidden = busy;
-    [_play setImage:[GMArt glyph:p.playing ? @"pause" : @"play" size:44 color:[GMTheme text]] forState:UIControlStateNormal];
+    // Đang chờ dữ liệu: vòng quay thay hình nút, nút vẫn bấm được (mạng chậm có thể chờ lâu — vẫn phải dừng được)
+    [_play setImage:busy ? nil : [GMArt glyph:p.playing ? @"pause" : @"play" size:44 color:[GMTheme text]] forState:UIControlStateNormal];
     UIColor *on = [GMTheme accent], *off = [GMTheme secondaryText];
     [_shuffle setImage:[GMArt glyph:@"shuffle" size:22 color:p.shuffle ? on : off] forState:UIControlStateNormal];
     [_repeat setImage:[GMArt glyph:p.repeat == GMRepeatOne ? @"repeat1" : @"repeat" size:22 color:p.repeat != GMRepeatOff ? on : off]
@@ -373,9 +375,11 @@ static NSString *GMRateText(NSNumber *rate) {
 
 - (void)slideStart {
     _dragging = YES;
+    _slid = NO;
 }
 
 - (void)sliding {
+    _slid = YES;
     double d = [GMPlayer shared].duration;
     _elapsed.text = GMDuration(_slider.value);
     _remain.text = d > 0 ? [@"-" stringByAppendingString:GMDuration(MAX(0, d - _slider.value))] : @"";
@@ -383,7 +387,9 @@ static NSString *GMRateText(NSNumber *rate) {
 
 - (void)slideEnd {
     _dragging = NO;
-    [[GMPlayer shared] seek:_slider.value];
+    // Chỉ tua khi đã kéo, và khi biết độ dài bài (chưa biết: thanh 0–1 giây, chạm vào là tua về đầu)
+    if (_slid && [GMPlayer shared].duration > 0) [[GMPlayer shared] seek:_slider.value];
+    _slid = NO;
 }
 
 - (void)toggleShuffle {

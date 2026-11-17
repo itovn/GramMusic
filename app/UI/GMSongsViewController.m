@@ -36,6 +36,11 @@ static NSString *GMCount(NSInteger n) {
     NSMutableArray *_menu;      // khối của các nút trong bảng thao tác đang mở
     UIBarButtonItem *_savedLeft, *_savedRight;
     BOOL _selecting;
+    // Đang chọn nhiều bài: bài đã chọn theo khoá (khoá → @[vị trí, bài]) — không đọc lại theo dòng của bảng, vì danh sách có thể
+    // đổi bên dưới; tải lại danh sách (tìm, xếp, quét xong…) hoãn tới lúc thôi chọn (_reloadPending).
+    NSMutableDictionary *_picked;
+    BOOL _reloadPending;
+    UIActionSheet *_sheet;  // bảng thao tác đang mở (delegate = self, không giữ self)
 }
 
 - (instancetype)initWithKind:(GMSongsKind)kind {
@@ -56,6 +61,7 @@ static NSString *GMCount(NSInteger n) {
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    _sheet.delegate = nil;
     [_searchTimer invalidate];
     [_reloadTimer invalidate];
 }
@@ -92,11 +98,26 @@ static NSString *GMCount(NSInteger n) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     if (_kind == GMSongsPlaylist) [self loadItems];
-    else if (_kind == GMSongsOffline) [_list reload];  // vừa tải / xoá ở màn khác
+    else if (_kind == GMSongsOffline) [self reloadList];  // vừa tải / xoá ở màn khác
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    // iPad: bảng thao tác mở từ nút trên thanh điều hướng là popover, vẫn bấm được «Quay lại» — đóng nó trước khi màn này bị bỏ
+    if (_sheet.visible) [_sheet dismissWithClickedButtonIndex:_sheet.cancelButtonIndex animated:NO];
+}
+
+/// Tải lại danh sách — đang chọn nhiều bài thì để tới lúc thôi chọn (bảng giữ bố cục cũ, bài đã chọn giữ nguyên).
+- (void)reloadList {
+    if (_selecting) {
+        _reloadPending = YES;
+        return;
+    }
+    [_list reload];
 }
 
 - (void)loggedIn {
-    [_list reload];
+    [self reloadList];
     [self loadStats];
 }
 
@@ -254,7 +275,12 @@ static NSString *GMCount(NSInteger n) {
 }
 
 - (void)listChanged {
-    if (_selecting) return;
+    if (_selecting) {
+        // Chỉ có trang mới về (tải lại đã hoãn): vẽ lại rồi chọn lại các bài đã chọn
+        [self.tableView reloadData];
+        [self restoreSelection];
+        return;
+    }
     [self.tableView reloadData];
     [self updateStatus];
     GM_IOS6_BEGIN
@@ -269,7 +295,10 @@ static NSString *GMCount(NSInteger n) {
 }
 
 - (NSInteger)globalIndex:(NSIndexPath *)ip {
-    if ([self alpha]) return [GMVal([_list.sections objectAtIndex:ip.section], @"i") integerValue] + ip.row;
+    if ([self alpha]) {
+        if (ip.section >= (NSInteger)_list.sections.count) return -1;
+        return [GMVal([_list.sections objectAtIndex:ip.section], @"i") integerValue] + ip.row;
+    }
     return ip.row;
 }
 
@@ -297,12 +326,12 @@ static NSString *GMCount(NSInteger n) {
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    if ([self alpha]) return [GMVal([_list.sections objectAtIndex:s], @"n") integerValue];
+    if ([self alpha]) return s < (NSInteger)_list.sections.count ? [GMVal([_list.sections objectAtIndex:s], @"n") integerValue] : 0;
     return _list ? _list.total : _shown.count;
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)s {
-    return [self alpha] ? GMVal([_list.sections objectAtIndex:s], @"t") : nil;
+    return [self alpha] && s < (NSInteger)_list.sections.count ? GMVal([_list.sections objectAtIndex:s], @"t") : nil;
 }
 
 - (NSArray *)sectionIndexTitlesForTableView:(UITableView *)tv {
@@ -361,7 +390,7 @@ static NSString *GMCount(NSInteger n) {
 
 - (void)songRemoved:(NSString *)key {
     if (_list) {
-        [_list reload];
+        [self reloadList];
         return;
     }
     if ([_playlistId isEqual:@"recent"]) {
@@ -383,11 +412,21 @@ static NSString *GMCount(NSInteger n) {
 }
 
 - (void)tableView:(UITableView *)tv didDeselectRowAtIndexPath:(NSIndexPath *)ip {
-    if (_selecting) [self updateSelectButtons];
+    if (!_selecting) return;
+    NSInteger g = [self globalIndex:ip];
+    for (NSString *k in [_picked allKeys]) {
+        if ([[[_picked objectForKey:k] objectAtIndex:0] integerValue] == g) [_picked removeObjectForKey:k];
+    }
+    [self updateSelectButtons];
 }
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     if (_selecting) {
+        NSInteger g = [self globalIndex:ip];
+        NSDictionary *s = [self songAt:g];
+        NSString *k = GMVal(s, @"key");
+        if (k) [_picked setObject:@[@(g), s] forKey:k];
+        else [tv deselectRowAtIndexPath:ip animated:NO];  // ô chưa có bài (trang đang tải)
         [self updateSelectButtons];
         return;
     }
@@ -453,8 +492,14 @@ static NSString *GMCount(NSInteger n) {
 
 /// Bảng thao tác dùng khối (UIActionSheet không giữ khối — lưu ở `_menu`).
 - (void)sheet:(NSString *)title items:(NSArray *)items from:(UIBarButtonItem *)anchor {
+    // iPad: bấm lại nút khi bảng đang mở (popover) = đóng, không chồng hai bảng dùng chung _menu
+    if (_sheet.visible) {
+        [_sheet dismissWithClickedButtonIndex:_sheet.cancelButtonIndex animated:YES];
+        return;
+    }
     UIActionSheet *a = [[UIActionSheet alloc] initWithTitle:title delegate:self cancelButtonTitle:nil destructiveButtonTitle:nil
                                           otherButtonTitles:nil];
+    _sheet = a;
     _menu = [NSMutableArray array];
     for (NSArray *it in items) {
         [a addButtonWithTitle:[it objectAtIndex:0]];
@@ -466,7 +511,12 @@ static NSString *GMCount(NSInteger n) {
 }
 
 - (void)actionSheet:(UIActionSheet *)sheet clickedButtonAtIndex:(NSInteger)i {
+    if (sheet != _sheet) return;
     if (i >= 0 && i < (NSInteger)_menu.count) ((void (^)(void))[_menu objectAtIndex:i])();
+}
+
+- (void)actionSheet:(UIActionSheet *)sheet didDismissWithButtonIndex:(NSInteger)i {
+    if (sheet == _sheet) _sheet = nil;
 }
 
 - (void)showMenu {
@@ -523,7 +573,12 @@ static NSString *GMCount(NSInteger n) {
 - (void)startSelecting {
     if (_selecting) return;
     _selecting = YES;
+    _picked = [NSMutableDictionary dictionary];
     [_search resignFirstResponder];
+    // Tìm / đổi cách xếp đổi cả danh sách — khoá lại tới lúc thôi chọn
+    _search.userInteractionEnabled = NO;
+    _search.alpha = 0.5;
+    _sortCtl.enabled = NO;
     _savedLeft = self.navigationItem.leftBarButtonItem;
     _savedRight = self.navigationItem.rightBarButtonItem;
     self.navigationItem.hidesBackButton = YES;
@@ -538,26 +593,49 @@ static NSString *GMCount(NSInteger n) {
 }
 
 - (void)stopSelecting {
+    if (!_selecting) return;
     _selecting = NO;
+    [_picked removeAllObjects];
+    _search.userInteractionEnabled = YES;
+    _search.alpha = 1;
+    _sortCtl.enabled = YES;
     [self setEditing:NO animated:YES];
     self.navigationItem.leftBarButtonItem = _savedLeft;
     self.navigationItem.rightBarButtonItem = _savedRight;
     self.navigationItem.hidesBackButton = NO;
     [self.tableView reloadData];
+    if (_reloadPending) {
+        _reloadPending = NO;
+        [_list reload];
+    }
 }
 
+/// Chọn lại trên bảng các bài đã chọn còn ở đúng chỗ cũ (sau reloadData — bảng bỏ hết dòng đang chọn).
+- (void)restoreSelection {
+    for (NSString *k in [_picked allKeys]) {
+        NSInteger g = [[[_picked objectForKey:k] objectAtIndex:0] integerValue];
+        NSIndexPath *ip = [self pathFor:g];
+        if (ip && [GMVal([self songAt:g], @"key") isEqual:k]) {
+            [self.tableView selectRowAtIndexPath:ip animated:NO scrollPosition:UITableViewScrollPositionNone];
+        }
+    }
+}
+
+/// Bài đã chọn, theo thứ tự trong danh sách.
 - (NSArray *)selectedSongs {
+    NSArray *picks = [[_picked allValues] sortedArrayUsingComparator:^NSComparisonResult(NSArray *a, NSArray *b) {
+        return [[a objectAtIndex:0] compare:[b objectAtIndex:0]];
+    }];
     NSMutableArray *v = [NSMutableArray array];
-    NSArray *ips = [[self.tableView indexPathsForSelectedRows] sortedArrayUsingSelector:@selector(compare:)];
-    for (NSIndexPath *ip in ips) {
-        NSDictionary *s = [self songAt:[self globalIndex:ip]];
-        if (s && ![GMVal(s, @"missing") boolValue]) [v addObject:s];
+    for (NSArray *p in picks) {
+        NSDictionary *s = [p objectAtIndex:1];
+        if (![GMVal(s, @"missing") boolValue]) [v addObject:s];
     }
     return v;
 }
 
 - (void)updateSelectButtons {
-    NSUInteger n = [self.tableView indexPathsForSelectedRows].count;
+    NSUInteger n = _picked.count;
     self.navigationItem.leftBarButtonItem.title = n ? [NSString stringWithFormat:@"Thao tác (%lu)", (unsigned long)n] : @"Thao tác";
     self.navigationItem.leftBarButtonItem.enabled = n > 0;
 }
@@ -578,8 +656,10 @@ static NSString *GMCount(NSInteger n) {
             [ws stopSelecting];
         } copy]]];
         [items addObject:@[@"Phát tiếp theo", [^{
+            // Chưa phát gì: phát luôn theo thứ tự đã chọn (insertNext lúc trống là phát ngay bài được chen — chen ngược sẽ đảo thứ tự)
+            if (![GMPlayer shared].current) [[GMPlayer shared] playSongs:playable at:0];
             // chen theo đúng thứ tự: bài cuối chen trước
-            for (NSDictionary *s in [playable reverseObjectEnumerator]) [[GMPlayer shared] insertNext:s];
+            else for (NSDictionary *s in [playable reverseObjectEnumerator]) [[GMPlayer shared] insertNext:s];
             [GMTheme toast:@"Sẽ phát tiếp theo" in:host];
             [ws stopSelecting];
         } copy]]];
@@ -615,7 +695,7 @@ static NSString *GMCount(NSInteger n) {
 - (void)runSearch {
     if (_list) {
         _list.query = _search.text;
-        [_list reload];
+        [self reloadList];
     } else {
         [self filterItems];
     }
@@ -633,7 +713,7 @@ static NSString *GMCount(NSInteger n) {
     NSArray *sorts = @[@"date", @"title", @"artist"];
     _list.sort = [sorts objectAtIndex:MAX(0, _sortCtl.selectedSegmentIndex)];
     if (_kind != GMSongsOffline) [[NSUserDefaults standardUserDefaults] setObject:_list.sort forKey:@"songs.sort"];
-    [_list reload];
+    [self reloadList];
 }
 
 - (void)refresh {
@@ -657,7 +737,7 @@ static NSString *GMCount(NSInteger n) {
 - (void)scheduleReload {
     if (!_list) return;
     [_reloadTimer invalidate];
-    _reloadTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:_list selector:@selector(reload) userInfo:nil repeats:NO];
+    _reloadTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 target:self selector:@selector(reloadList) userInfo:nil repeats:NO];
 }
 
 - (void)coreEvent:(NSNotification *)n {

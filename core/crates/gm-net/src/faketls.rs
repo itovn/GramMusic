@@ -205,6 +205,7 @@ pub(crate) fn verify_server(resp: &[u8], key: &[u8; 16], client_random: &[u8; 32
     let mut zeroed = resp.to_vec();
     zeroed[RANDOM_AT..RANDOM_AT + 32].fill(0);
     if hmac(key, &[client_random, &zeroed]) != resp[RANDOM_AT..RANDOM_AT + 32] {
+        crate::clock::mark_stale();
         let clock = match crate::clock::offset_ms() {
             Some(ms) => format!("giờ máy lệch {:+.1} s, đã chỉnh theo NTP", ms as f64 / 1000.0),
             None => "chưa đo được giờ chuẩn (NTP) — kiểm tra Ngày & Giờ của máy".into(),

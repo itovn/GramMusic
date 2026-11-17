@@ -188,3 +188,35 @@
   lỗi theo từng khúc.
 - [ ] iPad 1: đo giải mã + RAM.
 - [ ] iPhone 5 đen: anh đăng nhập để thử GramMusic trên máy thứ hai.
+
+## 18/11/2026 — rà soát toàn bộ app, phát hành 1.0.3
+
+- Anh nhờ rà soát cả app, tự sửa, tự thử, tự phát hành. Chi tiết từng lỗi: DECISIONS **M24** (khoảng 35 lỗi: app tắt, mất nhạc /
+  phát sai, thư viện / đăng nhập, mạng, rò bộ nhớ).
+- Lỗi lớn nhất tìm được nhờ thử trên máy: **bài .wav gốc trên Telegram không phát được** (lỗi -1001 sau ~19 giây — có từ trước 1.0.2)
+  do lõi không trả phần ảnh bìa nằm sau dữ liệu âm thanh; và phát được thì ~30 giây đứng vì ước sai bitrate.
+- Thử trên máy (bản thử):
+  - iPad mini 1 (mượn của phiên GramBook ~20 phút): bài .wav 35 MB trước lỗi -1001 → nạp 1,5 giây, phát liền qua giây 39, tua 120 →
+    phát tiếp; mở giữa bài (giây 120 FLAC, giây 100 WAV) → tua đúng chỗ rồi mới phát, không nghe đầu bài; hết hàng chờ → tua 100 →
+    bấm phát mở lại ở 100; tua FLAC tới 300 → chờ dữ liệu 1,6 giây → phát; «Chọn nhiều bài» (3 bài) + xếp lại / tìm / kéo làm mới →
+    vẫn 3 bài, không tắt app; hết bài tự sang bài kế, bấm bài kế đúng một bước. Không có báo cáo crash.
+  - iPhone 5 đen (chưa đăng nhập — tệp mẫu âm thử 40 giây, FLAC / Opus, `Documents/GMTest`): Opus trên máy phát được; «Xoá đệm» lúc
+    đang phát → bài kế và bài vừa bị xoá bản giải đều phát lại được (lõi tự giải lại); hẹn giờ «Hết bài này» dừng đúng cuối bài 1/3;
+    bấm bài kế ở giây 38,6/40 trong lúc đang chờ tua → sang 2/3 (trước đây nhảy dư); nghe tiếp sau khi tắt hẳn app.
+  - Chưa thử trên máy: đăng nhập (cần mã thật), khung màn hình khoá khi app chết (không khoá máy từ xa được), bảng «⋯» trên iPad khi
+    bấm «Quay lại».
+- Phát hành 1.0.3: gói 3.172.864 byte (sha256 `880cd29d…`), không còn mã thử; `symcheck` 341 ký hiệu, thiếu 0 trên iOS 6.1.4 (iPhone 5
+  đen), iOS 6.1.3 (iPad mini 1), iOS 5.1.1 (iPad 1). Nguồn Cydia giữ 3 bản mới nhất (1.0.1 / 1.0.2 / 1.0.3), trang giới thiệu
+  «Bản 1.0.3», GitHub **v1.0.3**.
+- Công cụ thử: thư mục `/var/mobile/Documents` trên iPhone đen do lệnh root tạo → app không xoá được tệp lệnh `GramMusic-cmd.txt`, lệnh
+  chạy lặp mỗi 0,5 giây; đã trả quyền cho `mobile`.
+
+### Còn lại
+
+- [ ] Ảnh màn hình khoá có khung GramLockControl cho trang giới thiệu (cần anh bấm nút nguồn; dữ liệu mẫu).
+- [ ] OTA (tự cập nhật như GramMini).
+- [ ] Mở bài FLAC nhanh hơn khi mạng chậm (lúc mở, AVPlayer đọc thử cuối tệp WAV → lõi phải tải phần cuối tệp FLAC trước).
+- [ ] Lỗi tải của một khúc đang làm hỏng cả lần chờ khúc khác của cùng bài (lỗi lưu chung theo bài) — nên tách lỗi theo từng khúc.
+- [ ] `sources.json` hỏng thì thư viện trống tới lần quét sau (đã giảm khả năng hỏng bằng `sync_all`); nên đọc `library/*.json` độc lập.
+- [ ] iPad 1: đo giải mã + RAM.
+- [ ] iPhone 5 đen: anh đăng nhập để thử GramMusic với Telegram trên máy thứ hai.
