@@ -110,5 +110,19 @@
 - [ ] Tweak SpringBoard cho thanh tiến trình / nút trên màn hình khoá (nếu anh đồng ý).
 - [ ] Mở bài FLAC nhanh hơn khi mạng chậm (phần cuối tệp WAV lúc AVPlayer đọc thử).
 - [ ] «Nhạc trên máy» (app Nhạc) trên máy thật; iPad 1 đo giải mã + RAM.
-- [ ] Đưa lên GitHub (itovn/GramMusic) + trang giới thiệu kiểu iOS 6 như GramMini — khi app hoàn thiện.
+- [x] Đưa lên GitHub (itovn/GramMusic) + trang giới thiệu kiểu iOS 6 như GramMini (xem dưới).
 - [ ] OTA.
+
+## 17/11/2026 — phát hành 1.0.0
+
+- Tweak **GramLockControl** (M20) trên màn hình khoá: lời đang hát / «♪ Nhạc không lời», thanh tiến trình kéo để tua, nút điều khiển;
+  bật / tắt trong Cài đặt của iPhone. Anh thử trên iPhone 5: lời hiện đúng; tên bài phía trên hết giật.
+- Bản **1.0.0** (`tools/build-release.sh`): 3,1 MB, không còn mã thử; `symcheck` 340 ký hiệu, thiếu 0 trên iOS 6.1.4 và iOS 5.1.1.
+- GitHub: repo công khai **itovn/GramMusic** (nhánh `main`), bản phát hành **v1.0.0** kèm `.deb`, trang giới thiệu kiểu iOS 6 +
+  nguồn Cydia ở nhánh `gh-pages` (https://itovn.github.io/GramMusic/ — `tools/update-cydia-repo.sh`). Trước khi đưa lên: rà khoá /
+  IP / số điện thoại / mã chat / tên bài trong thư viện của anh khỏi tài liệu.
+
+### Còn lại
+
+- [ ] Ảnh màn hình cho trang giới thiệu (dữ liệu mẫu — không dùng thư viện thật của anh).
+- [ ] OTA (tự cập nhật như GramMini); mở bài FLAC nhanh hơn khi mạng chậm; iPad 1 đo giải mã + RAM.
