@@ -1,0 +1,18 @@
+[package]
+name = "gm-cli"
+description = "GramMusic: chạy thử lõi trên PC (Windows / Linux) — đăng nhập, quét thư viện, phát thử qua cổng nội bộ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+gm-net = { path = "../gm-net" }
+gm-core = { path = "../gm-core" }
+grammers-mtsender.workspace = true
+tokio = { workspace = true, features = ["rt", "time", "net", "io-util"] }
+serde_json = "1"
+
+# Nhập mật khẩu 2FA không hiện ra màn hình (đăng nhập làm trên PC)
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+rpassword = "7"

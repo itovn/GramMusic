@@ -1,0 +1,925 @@
+#import "GMPlayer.h"
+#import "GMArt.h"
+#import "GMLocalMusic.h"
+#import "GMLockState.h"
+#import "GMCore.h"
+#import "GMImages.h"
+#import "GMLog.h"
+#import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <MediaPlayer/MediaPlayer.h>
+
+NSString *const GMPlayerChangedNotification = @"GMPlayerChanged";
+NSString *const GMPlayerMessageNotification = @"GMPlayerMessage";
+
+static void *kItemStatus = &kItemStatus;
+static void *kItemKeepUp = &kItemKeepUp;
+static void *kPlayerRate = &kPlayerRate;
+static void *kPlayerItem = &kPlayerItem;
+
+/// Bài không phát được liên tiếp quá chừng này thì dừng (khỏi nhảy qua cả hàng chờ khi mất mạng).
+static const NSInteger kMaxFails = 3;
+
+@interface GMPlayer () <AVAudioSessionDelegate>
+@end
+
+@implementation GMPlayer {
+    AVQueuePlayer *_player;
+    NSMutableArray *_keys;      // thứ tự phát
+    NSMutableArray *_orig;      // thứ tự gốc (khi trộn)
+    NSMutableDictionary *_info; // khoá → dict bài
+    NSInteger _index;
+    AVPlayerItem *_curItem, *_nextItem;
+    NSString *_curKey, *_nextKey;
+    NSInteger _nextIndex;
+    NSMutableSet *_observed;    // item đang được KVO (bỏ đúng lúc, khỏi lỗi «not registered»)
+    BOOL _wantPlay;
+    BOOL _ended;                // hết hàng chờ (bấm phát = phát lại bài cuối từ đầu)
+    double _resumeAt;
+    NSInteger _gen;
+    NSInteger _fails;
+    id _timeObs;
+    NSTimer *_sleepTimer;
+    BOOL _sleepEnd;
+    UIBackgroundTaskIdentifier _bg;
+    long long _lastSave;
+    UIImage *_artwork;
+    MPMediaItemArtwork *_artworkItem;  // giữ lại — cập nhật màn hình khoá mỗi giây khỏi tạo lại
+    NSInteger _lockSec;                // giây đã ghi lên màn hình khoá lần trước
+    NSString *_artworkKey;
+    BOOL _interrupted;
+    long long _readyT0;  // lúc tạo item (đo thời gian tới khi sẵn sàng)
+}
+
++ (instancetype)shared {
+    static GMPlayer *p;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ p = [[GMPlayer alloc] init]; });
+    return p;
+}
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        _keys = [NSMutableArray array];
+        _info = [NSMutableDictionary dictionary];
+        _observed = [NSMutableSet set];
+        _nextIndex = -1;
+        _index = -1;
+        _bg = UIBackgroundTaskInvalid;
+    }
+    return self;
+}
+
+#pragma mark - Phiên âm thanh
+
+static void GMRouteChanged(void *ctx, AudioSessionPropertyID prop, UInt32 size, const void *data) {
+    if (prop != kAudioSessionProperty_AudioRouteChange || !data) return;
+    CFDictionaryRef d = (CFDictionaryRef)data;
+    CFNumberRef r = CFDictionaryGetValue(d, CFSTR(kAudioSession_AudioRouteChangeKey_Reason));
+    SInt32 reason = 0;
+    if (r) CFNumberGetValue(r, kCFNumberSInt32Type, &reason);
+    if (reason == kAudioSessionRouteChangeReason_OldDeviceUnavailable) {
+        // Rút tai nghe: tạm dừng (như app Nhạc của iOS)
+        dispatch_async(dispatch_get_main_queue(), ^{ [[GMPlayer shared] pause]; });
+    }
+}
+
+- (void)setup {
+    AVAudioSession *s = [AVAudioSession sharedInstance];
+    [s setCategory:AVAudioSessionCategoryPlayback error:NULL];
+    s.delegate = self;  // ngắt (cuộc gọi đến) — iOS 5 chỉ có cách này (thông báo AVAudioSessionInterruption có từ iOS 6)
+    AudioSessionInitialize(NULL, NULL, NULL, NULL);
+    AudioSessionAddPropertyListener(kAudioSessionProperty_AudioRouteChange, GMRouteChanged, NULL);
+    _player = [[AVQueuePlayer alloc] init];
+    _player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
+    [_player addObserver:self forKeyPath:@"rate" options:0 context:kPlayerRate];
+    [_player addObserver:self forKeyPath:@"currentItem" options:0 context:kPlayerItem];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(itemEnded:)
+                                                 name:AVPlayerItemDidPlayToEndTimeNotification object:nil];
+    __weak GMPlayer *me = self;
+    _timeObs = [_player addPeriodicTimeObserverForInterval:CMTimeMake(1, 1) queue:dispatch_get_main_queue() usingBlock:^(CMTime t) {
+        [me tick];
+    }];
+    [self restoreState];
+}
+
+- (void)beginInterruption {
+    _interrupted = YES;
+    [self notify];
+}
+
+- (void)endInterruptionWithFlags:(NSUInteger)flags {
+    _interrupted = NO;
+    [[AVAudioSession sharedInstance] setActive:YES error:NULL];
+    if ((flags & AVAudioSessionInterruptionFlags_ShouldResume) && _wantPlay) [_player play];
+    else _wantPlay = NO;  // iOS không cho phát tiếp: coi như đã dừng (khỏi tự phát lại lúc có dữ liệu)
+    [self updateNowPlaying];
+    [self notify];
+}
+
+#pragma mark - Trạng thái
+
+- (void)notify {
+    [[NSNotificationCenter defaultCenter] postNotificationName:GMPlayerChangedNotification object:self];
+}
+
+- (void)say:(NSString *)text {
+    [[NSNotificationCenter defaultCenter] postNotificationName:GMPlayerMessageNotification object:self userInfo:@{@"text": text}];
+}
+
+- (NSString *)currentKey {
+    return _index >= 0 && _index < (NSInteger)_keys.count ? [_keys objectAtIndex:_index] : nil;
+}
+
+/// Bài đang phát; thông tin chưa lấy xong (nhảy tới bài xa trong hàng chờ dài) thì trả bản tạm chỉ có khoá — màn Đang phát / thanh
+/// phát nhỏ không tưởng hàng chờ đã hết.
+- (NSDictionary *)current {
+    NSString *k = [self currentKey];
+    if (!k) return nil;
+    return [_info objectForKey:k] ?: @{@"key": k, @"title": @"…", @"loading": @YES};
+}
+
+- (NSArray *)queueKeys {
+    return [_keys copy];
+}
+
+- (NSInteger)index {
+    return _index;
+}
+
+- (BOOL)playing {
+    return _wantPlay;
+}
+
+- (BOOL)buffering {
+    if (!_wantPlay || !_curItem) return _wantPlay && !_curItem && [self currentKey] != nil;
+    return _curItem.status != AVPlayerItemStatusReadyToPlay || (_player.rate == 0 && !_interrupted);
+}
+
+- (double)position {
+    if (!_curItem) return _resumeAt;
+    double t = CMTimeGetSeconds(_player.currentTime);
+    return t == t ? t : 0;
+}
+
+- (double)duration {
+    if (_curItem) {
+        CMTime d = _curItem.duration;
+        if (CMTIME_IS_NUMERIC(d)) {
+            double s = CMTimeGetSeconds(d);
+            if (s > 0) return s;
+        }
+    }
+    return [[self.current objectForKey:@"dur"] doubleValue];
+}
+
+- (NSDictionary *)infoFor:(NSString *)key {
+    return [_info objectForKey:key];
+}
+
+/// Thông tin của các bài còn thiếu (lõi trả bài còn trong thư viện, bài đã mất có `missing`).
+- (void)fetchInfo:(NSArray *)keys done:(void (^)(void))done {
+    NSMutableArray *miss = [NSMutableArray array];
+    for (NSString *k in keys) {
+        if ([_info objectForKey:k]) continue;
+        if ([GMLocalMusic isIPodKey:k]) {
+            // Bài của app Nhạc: đọc tại chỗ (MediaPlayer), không qua lõi
+            NSDictionary *s = [GMLocalMusic songForKey:k];
+            [_info setObject:s ?: @{@"key": k, @"title": @"", @"missing": @YES, @"ok": @NO} forKey:k];
+            continue;
+        }
+        [miss addObject:k];
+    }
+    if (!miss.count) {
+        if (done) done();
+        return;
+    }
+    [GMCore call:@"library.songs" args:@{@"keys": miss} done:^(id ok, NSDictionary *err) {
+        if ([ok isKindOfClass:[NSArray class]]) {
+            for (NSDictionary *s in ok) {
+                NSString *k = [s objectForKey:@"key"];
+                if (k) [_info setObject:s forKey:k];
+            }
+        }
+        if (done) done();
+    }];
+}
+
+- (void)fetchAround:(NSInteger)i done:(void (^)(void))done {
+    NSInteger a = MAX(0, i - 2), b = MIN((NSInteger)_keys.count, i + 30);
+    [self fetchInfo:[_keys subarrayWithRange:NSMakeRange(a, MAX(0, b - a))] done:done];
+}
+
+- (void)updateSong:(NSDictionary *)song {
+    NSString *k = [song objectForKey:@"key"];
+    if (k && [_info objectForKey:k]) {
+        [_info setObject:song forKey:k];
+        [self notify];
+    }
+}
+
+#pragma mark - Item
+
+- (void)watch:(AVPlayerItem *)item {
+    if (!item || [_observed containsObject:item]) return;
+    [item addObserver:self forKeyPath:@"status" options:0 context:kItemStatus];
+    [item addObserver:self forKeyPath:@"playbackLikelyToKeepUp" options:0 context:kItemKeepUp];
+    [_observed addObject:item];
+}
+
+- (void)unwatch:(AVPlayerItem *)item {
+    if (!item || ![_observed containsObject:item]) return;
+    [item removeObserver:self forKeyPath:@"status" context:kItemStatus];
+    [item removeObserver:self forKeyPath:@"playbackLikelyToKeepUp" context:kItemKeepUp];
+    [_observed removeObject:item];
+}
+
+- (void)dropNext {
+    if (_nextItem) {
+        if ([_player.items containsObject:_nextItem]) [_player removeItem:_nextItem];
+        [self unwatch:_nextItem];
+    }
+    _nextItem = nil;
+    _nextKey = nil;
+    _nextIndex = -1;
+}
+
+- (void)dropCurrent {
+    [self dropNext];
+    [_player removeAllItems];
+    [self unwatch:_curItem];
+    _curItem = nil;
+    _curKey = nil;
+}
+
+/// Tạo AVPlayerItem không chặn luồng chính. `playerItemWithURL:` đọc thử tệp ngay trên luồng gọi — WAV giải từ FLAC: AVPlayer đọc
+/// cả cuối tệp, lõi phải tải + giải phần cuối bài (đo 17/11: luồng chính đứng 7,6 giây). AVURLAsset nạp ở luồng nền, xong mới tạo item.
+- (void)itemFor:(NSURL *)url done:(void (^)(AVPlayerItem *item))done {
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+    [asset loadValuesAsynchronouslyForKeys:@[@"playable", @"duration", @"tracks"] completionHandler:^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            done([AVPlayerItem playerItemWithAsset:asset]);
+        });
+    }];
+}
+
+/// URL phát của bài: bài app Nhạc → assetURL (`{nsurl}`); còn lại hỏi lõi (`play.url` — cả tệp trên máy).
+- (void)urlFor:(NSString *)key done:(void (^)(id ok, NSDictionary *err))done {
+    if ([GMLocalMusic isIPodKey:key]) {
+        NSURL *u = [GMLocalMusic urlForKey:key];
+        if (u) done(@{@"nsurl": u, @"cached": @1}, nil);
+        else done(nil, @{@"code": @"FORMAT", @"msg": @"Bài này không phát được ngoài app Nhạc (có DRM hoặc chưa tải về máy)."});
+        return;
+    }
+    [GMCore call:@"play.url" args:@{@"key": key} done:done];
+}
+
+/// Mở bài ở `_index` (lấy URL từ lõi). `play`: phát ngay khi sẵn sàng; `at`: vị trí bắt đầu (giây).
+- (void)loadCurrent:(BOOL)play at:(double)at {
+    _gen++;
+    NSInteger gen = _gen;
+    [self dropCurrent];
+    _ended = NO;
+    _wantPlay = play;
+    _resumeAt = at;
+    NSString *key = [self currentKey];
+    if (!key) {
+        _wantPlay = NO;
+        [self notify];
+        return;
+    }
+    NSDictionary *info = [_info objectForKey:key];
+    if (!info) {
+        [self notify];
+        [self fetchAround:_index done:^{
+            if (gen != _gen) return;
+            if (![_info objectForKey:key]) [_info setObject:@{@"key": key, @"missing": @YES, @"ok": @NO} forKey:key];
+            [self loadCurrent:play at:at];
+        }];
+        return;
+    }
+    [self updateNowPlaying];
+    [self notify];
+    if (![[info objectForKey:@"ok"] boolValue]) {
+        [self failCurrent:[[info objectForKey:@"missing"] boolValue] ? @"Bài không còn trong thư viện — bỏ qua."
+                                                                    : [NSString stringWithFormat:@"Chưa phát được định dạng %@ — bỏ qua.",
+                                                                       [[info objectForKey:@"ext"] uppercaseString] ?: @"này"]];
+        return;
+    }
+    long long ta = GMNowMs();
+    [[AVAudioSession sharedInstance] setActive:YES error:NULL];
+    long long t0 = GMNowMs();
+    if (t0 - ta > 300) GMLog(@"phát: bật phiên âm thanh mất %lld ms", t0 - ta);
+    [self reportKey:key pos:at playing:play];
+    [self urlFor:key done:^(id ok, NSDictionary *err) {
+        if (gen != _gen) return;
+        if (err) {
+            GMLog(@"phát: play.url lỗi %@", [err objectForKey:@"code"]);
+            [self failCurrent:GMErrorText(err)];
+            return;
+        }
+        long long tu = GMNowMs();
+        NSURL *url = [ok objectForKey:@"nsurl"] ?: [NSURL URLWithString:[ok objectForKey:@"url"]];
+        double cached = [[ok objectForKey:@"cached"] doubleValue];
+        [self itemFor:url done:^(AVPlayerItem *item) {
+            if (gen != _gen) return;
+            long long ti = GMNowMs();
+            _curItem = item;
+            _curKey = key;
+            [self watch:item];
+            [_player insertItem:item afterItem:nil];
+            if (_wantPlay) [_player play];
+            GMLog(@"phát: có URL sau %lld ms, nạp tệp %lld ms (nền), gắn item %lld ms (đệm %.0f%%)", tu - t0, ti - tu, GMNowMs() - ti,
+                  cached * 100);
+            _readyT0 = GMNowMs();
+            if (![key hasPrefix:@"ipod:"] && ![key hasPrefix:@"file:"]) [GMCore call:@"play.played" args:@{@"key": key} done:nil];
+            [self notify];
+        }];
+    }];
+}
+
+/// Đang ở nền mà phải mở bài mới (không có bài nạp sẵn): xin thêm giờ chạy tới khi có tiếng (iOS 6 không cho app ở nền bắt đầu
+/// phát nếu đã bị treo — TubeMini D34); trả lại khi item sẵn sàng.
+- (void)holdBackground {
+    if (_bg == UIBackgroundTaskInvalid && [UIApplication sharedApplication].applicationState == UIApplicationStateBackground) {
+        _bg = [[UIApplication sharedApplication] beginBackgroundTaskWithExpirationHandler:^{ [self endBackgroundTask]; }];
+    }
+}
+
+/// Bài hiện tại không phát được: báo, sang bài sau (tối đa kMaxFails lần liền).
+- (void)failCurrent:(NSString *)why {
+    [self say:why];
+    [self holdBackground];
+    _fails++;
+    if (_fails >= kMaxFails || _keys.count <= 1) {
+        _fails = 0;
+        _wantPlay = NO;
+        [self dropCurrent];
+        [self notify];
+        return;
+    }
+    NSInteger n = [self nextIndexManual:YES];
+    if (n < 0) {
+        _wantPlay = NO;
+        [self notify];
+        return;
+    }
+    _index = n;
+    NSInteger gen = ++_gen;
+    BOOL play = _wantPlay;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gen == _gen) [self loadCurrent:play at:0];
+    });
+}
+
+/// Bài tiếp theo khi hết bài (lặp một bài: chính nó). -1 = hết hàng chờ.
+- (NSInteger)nextIndexAuto {
+    if (_repeat == GMRepeatOne) return _index;
+    return [self nextIndexManual:NO];
+}
+
+/// Bài tiếp theo khi bấm «Tiếp» (lặp một bài coi như lặp cả hàng). `wrap`: hết hàng thì quay về đầu kể cả không lặp.
+- (NSInteger)nextIndexManual:(BOOL)wrap {
+    if (!_keys.count) return -1;
+    if (_index + 1 < (NSInteger)_keys.count) return _index + 1;
+    return (_repeat != GMRepeatOff || wrap) ? 0 : -1;
+}
+
+/// Nạp sẵn bài kế tiếp vào hàng của AVQueuePlayer (bài đang phát đã sẵn sàng). Bài kế không phát được (định dạng, đã mất) thì bỏ
+/// qua tới bài phát được — hết bài là chuyển liền, không phải mở bài mới lúc app đang ở nền.
+- (void)preloadNext {
+    if (_nextItem || _nextKey || _sleepEnd || !_curItem || _curItem.status != AVPlayerItemStatusReadyToPlay) return;
+    NSInteger n = [self nextIndexAuto];
+    NSString *key = nil;
+    NSDictionary *info = nil;
+    for (NSInteger tries = 0; n >= 0 && tries < 50; tries++) {
+        key = [_keys objectAtIndex:n];
+        info = [_info objectForKey:key];
+        if (!info || [[info objectForKey:@"ok"] boolValue]) break;
+        if (n == _index) return;  // vòng hết hàng chờ mà không có bài nào phát được
+        n = n + 1 < (NSInteger)_keys.count ? n + 1 : (_repeat != GMRepeatOff ? 0 : -1);
+    }
+    if (n < 0 || !key) return;
+    NSInteger gen = _gen;
+    if (!info) {
+        [self fetchAround:n done:^{
+            if (gen == _gen && [_info objectForKey:key]) [self preloadNext];
+        }];
+        return;
+    }
+    if (![[info objectForKey:@"ok"] boolValue]) return;
+    _nextIndex = n;
+    _nextKey = key;
+    [self urlFor:key done:^(id ok, NSDictionary *err) {
+        if (gen != _gen || ![_nextKey isEqual:key] || _nextItem) return;
+        if (err) {
+            _nextKey = nil;
+            _nextIndex = -1;
+            return;
+        }
+        [self itemFor:[ok objectForKey:@"nsurl"] ?: [NSURL URLWithString:[ok objectForKey:@"url"]] done:^(AVPlayerItem *item) {
+            if (gen != _gen || ![_nextKey isEqual:key] || _nextItem) return;
+            if (![_player canInsertItem:item afterItem:_curItem]) return;
+            _nextItem = item;
+            [self watch:item];
+            [_player insertItem:item afterItem:_curItem];
+            GMLog(@"phát: đã nạp sẵn bài kế");
+        }];
+    }];
+}
+
+- (void)observeValueForKeyPath:(NSString *)path ofObject:(id)obj change:(NSDictionary *)change context:(void *)ctx {
+    if (ctx == kItemStatus) {
+        AVPlayerItem *item = obj;
+        if (item == _nextItem && item.status == AVPlayerItemStatusFailed) {
+            // Bài nạp sẵn hỏng: bỏ khỏi hàng — hết bài hiện tại thì itemEnded mở bài kế theo cách thường
+            GMLog(@"phát: bài nạp sẵn lỗi %@", item.error);
+            [self dropNext];
+            return;
+        }
+        if (item != _curItem) return;
+        if (item.status == AVPlayerItemStatusReadyToPlay) {
+            if (_readyT0) GMLog(@"phát: sẵn sàng sau %lld ms", GMNowMs() - _readyT0);
+            _readyT0 = 0;
+            _fails = 0;
+            if (_resumeAt > 1) {
+                [_player seekToTime:CMTimeMakeWithSeconds(_resumeAt, 1000)];
+                _resumeAt = 0;
+            }
+            if (_wantPlay) [_player play];
+            [self endBackgroundTask];
+            [self preloadNext];
+            [self updateNowPlaying];
+        } else if (item.status == AVPlayerItemStatusFailed) {
+            GMLog(@"phát: item lỗi %@", item.error);
+            [self failCurrent:@"Không phát được bài này (mạng hoặc tệp hỏng)."];
+        }
+        [self notify];
+    } else if (ctx == kItemKeepUp) {
+        AVPlayerItem *item = obj;
+        // Hết chờ dữ liệu (mạng chậm, vừa tua): phát tiếp nếu người dùng vẫn muốn phát
+        if (item == _curItem && item.playbackLikelyToKeepUp && _wantPlay && _player.rate == 0 && !_interrupted) [_player play];
+        [self notify];
+    } else if (ctx == kPlayerRate) {
+        [self updateNowPlaying];
+        [self notify];
+    } else if (ctx == kPlayerItem) {
+        [self currentItemChanged];
+    } else {
+        [super observeValueForKeyPath:path ofObject:obj change:change context:ctx];
+    }
+}
+
+/// AVQueuePlayer chuyển item: sang bài đã nạp sẵn, hoặc hết hàng.
+- (void)currentItemChanged {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self currentItemChanged]; });
+        return;
+    }
+    AVPlayerItem *now = _player.currentItem;
+    if (now == _curItem) return;
+    if (!now && _curItem && _wantPlay && !_ended && !_nextItem && _curItem.status == AVPlayerItemStatusReadyToPlay &&
+        CMTimeCompare(_curItem.currentTime, _curItem.duration) >= 0) {
+        // Hết bài mà không có bài nạp sẵn (thông báo hết bài có thể tới sau): mở bài kế như itemEnded
+        [self advanceAfterEnd];
+        return;
+    }
+    if (now && now == _nextItem) {
+        [self unwatch:_curItem];
+        _curItem = _nextItem;
+        _curKey = _nextKey;
+        _index = _nextIndex;
+        _nextItem = nil;
+        _nextKey = nil;
+        _nextIndex = -1;
+        _resumeAt = 0;
+        _gen++;
+        if (![_curKey hasPrefix:@"ipod:"] && ![_curKey hasPrefix:@"file:"]) [GMCore call:@"play.played" args:@{@"key": _curKey} done:nil];
+        [self reportPace];
+        [self fetchAround:_index done:nil];
+        [self updateNowPlaying];
+        if (_curItem.status == AVPlayerItemStatusFailed) {
+            [self failCurrent:@"Không phát được bài này (mạng hoặc tệp hỏng)."];
+            return;
+        }
+        [self preloadNext];
+        [self saveState];
+        [self notify];
+    }
+}
+
+- (void)itemEnded:(NSNotification *)n {
+    // Thông báo của AVPlayerItem có thể tới từ luồng khác
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self itemEnded:n]; });
+        return;
+    }
+    if (n.object != _curItem) return;
+    if (_sleepEnd) {
+        _sleepEnd = NO;
+        _wantPlay = NO;
+        [_player pause];
+    }
+    // Có bài nạp sẵn còn tốt: AVQueuePlayer tự sang (currentItemChanged)
+    if (_nextItem && _nextItem.status != AVPlayerItemStatusFailed && _wantPlay) return;
+    [self advanceAfterEnd];
+}
+
+/// Hết bài, không có bài nạp sẵn: mở bài kế (giữ app chạy ở nền tới khi có tiếng), hoặc dừng nếu hết hàng chờ.
+- (void)advanceAfterEnd {
+    [self dropNext];
+    NSInteger next = [self nextIndexAuto];
+    if (next < 0 || !_wantPlay) {
+        // Hết hàng chờ / hẹn giờ tắt: giữ bài cuối, bấm phát là phát lại từ đầu
+        _ended = YES;
+        _wantPlay = NO;
+        [self updateNowPlaying];
+        [self notify];
+        return;
+    }
+    [self holdBackground];
+    _index = next;
+    [self loadCurrent:YES at:0];
+}
+
+/// Nhịp nghe: báo lõi vị trí đang phát — lõi chỉ tải trước ~60 giây phía trước, tạm dừng thì thôi tải (DECISIONS M10).
+- (void)reportKey:(NSString *)key pos:(double)pos playing:(BOOL)playing {
+    if ([GMLocalMusic isIPodKey:key]) return;  // bài app Nhạc: lõi không tải gì
+    if (!key) return;
+    [GMCore call:@"play.pos" args:@{@"key": key, @"pos": @(pos == pos ? MAX(0, pos) : 0), @"playing": @(playing)} done:nil];
+}
+
+- (void)reportPace {
+    [self reportKey:_curKey ?: [self currentKey] pos:self.position playing:_wantPlay && !_interrupted];
+}
+
+- (void)tick {
+    [self reportPace];
+    if (_wantPlay && GMNowMs() - _lastSave > 10000) [self saveState];
+    // Máy khoá / app ở nền, không có tweak GramLockControl: thời gian chạy ở dòng thứ ba màn hình khoá (iOS 5 / 6 không có thanh tiến
+    // trình cho app ngoài — M18), 10 giây một lần — mỗi lần cập nhật iOS 6 vẽ lại cả cụm tên bài (cập nhật mỗi giây: tên bài giật)
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive && _wantPlay &&
+        ![GMLockState tweakShowsProgress] && labs((NSInteger)self.position - _lockSec) >= 10) {
+        [self updateNowPlaying];
+    }
+    [self notify];
+}
+
+#pragma mark - Điều khiển
+
+- (void)playSongs:(NSArray *)songs at:(NSInteger)i {
+    GMLog(@"phát: chọn %lu bài", (unsigned long)songs.count);
+    NSMutableArray *keys = [NSMutableArray array];
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    for (NSDictionary *s in songs) {
+        NSString *k = [s objectForKey:@"key"];
+        if (!k) continue;
+        [keys addObject:k];
+        [info setObject:s forKey:k];
+    }
+    [self playKeys:keys at:i info:info shuffle:_shuffle];
+}
+
+- (void)playKeys:(NSArray *)keys at:(NSInteger)i info:(NSDictionary *)info shuffle:(BOOL)shuffle {
+    if (!keys.count) return;
+    [_info addEntriesFromDictionary:info];
+    i = MAX(0, MIN(i, (NSInteger)keys.count - 1));
+    _shuffle = shuffle;
+    _orig = [keys mutableCopy];
+    if (shuffle) {
+        NSMutableArray *rest = [keys mutableCopy];
+        NSString *first = [rest objectAtIndex:i];
+        [rest removeObjectAtIndex:i];
+        for (NSUInteger k = rest.count; k > 1; k--) [rest exchangeObjectAtIndex:k - 1 withObjectAtIndex:arc4random_uniform((u_int32_t)k)];
+        [rest insertObject:first atIndex:0];
+        _keys = rest;
+        _index = 0;
+    } else {
+        _keys = [keys mutableCopy];
+        _index = i;
+    }
+    _fails = 0;
+    [self loadCurrent:YES at:0];
+    [self saveState];
+}
+
+- (void)togglePlay {
+    if (_wantPlay) [self pause];
+    else [self play];
+}
+
+- (void)play {
+    if (![self currentKey]) return;
+    [[AVAudioSession sharedInstance] setActive:YES error:NULL];
+    if (!_curItem || _ended || _curItem.status == AVPlayerItemStatusFailed) {
+        [self loadCurrent:YES at:_ended ? 0 : _resumeAt];
+        return;
+    }
+    _wantPlay = YES;
+    [_player play];
+    [self reportPace];
+    [self updateNowPlaying];
+    [self notify];
+}
+
+- (void)pause {
+    _wantPlay = NO;
+    [_player pause];
+    [self reportPace];
+    [self saveState];
+    [self updateNowPlaying];
+    [self notify];
+}
+
+- (void)next {
+    NSInteger n = [self nextIndexManual:YES];
+    if (n < 0) return;
+    _index = n;
+    _fails = 0;
+    [self loadCurrent:YES at:0];
+    [self saveState];
+}
+
+- (void)previous {
+    if (self.position > 3 || _keys.count <= 1) {
+        [self seek:0];
+        return;
+    }
+    _index = _index > 0 ? _index - 1 : (NSInteger)_keys.count - 1;
+    _fails = 0;
+    [self loadCurrent:YES at:0];
+    [self saveState];
+}
+
+- (void)seek:(double)t {
+    // Tua lúc app ở nền tới chỗ chưa có dữ liệu → tiếng tạm dừng → iOS 6 treo app ngay (không phát lại được): giữ app chạy tới khi
+    // có tiếng (hết giờ tự trả — endBackgroundTask khi item sẵn sàng / phát tiếp)
+    if (_wantPlay) [self holdBackground];
+    if (!_curItem || _curItem.status != AVPlayerItemStatusReadyToPlay) {
+        _resumeAt = t;
+        return;
+    }
+    [_player seekToTime:CMTimeMakeWithSeconds(MAX(0, t), 1000)];
+    [self reportKey:_curKey pos:t playing:_wantPlay];
+    [self updateNowPlaying];
+    [self notify];
+}
+
+- (void)jumpTo:(NSInteger)i {
+    if (i < 0 || i >= (NSInteger)_keys.count) return;
+    _index = i;
+    _fails = 0;
+    [self loadCurrent:YES at:0];
+    [self saveState];
+}
+
+- (void)queueChanged {
+    // Bài nạp sẵn có thể không còn là bài kế tiếp
+    [self dropNext];
+    [self preloadNext];
+    [self saveState];
+    [self notify];
+}
+
+- (void)insertNext:(NSDictionary *)song {
+    NSString *k = [song objectForKey:@"key"];
+    if (!k) return;
+    [_info setObject:song forKey:k];
+    if (![self currentKey]) {
+        [self playSongs:@[song] at:0];
+        return;
+    }
+    [_keys insertObject:k atIndex:_index + 1];
+    if (_shuffle && _orig) {
+        NSUInteger at = [_orig indexOfObject:[self currentKey]];
+        [_orig insertObject:k atIndex:at == NSNotFound ? _orig.count : at + 1];
+    }
+    [self queueChanged];
+}
+
+- (void)append:(NSDictionary *)song {
+    NSString *k = [song objectForKey:@"key"];
+    if (!k) return;
+    [_info setObject:song forKey:k];
+    if (![self currentKey]) {
+        [self playSongs:@[song] at:0];
+        return;
+    }
+    [_keys addObject:k];
+    if (_shuffle && _orig) [_orig addObject:k];
+    [self queueChanged];
+}
+
+- (void)removeAt:(NSInteger)i {
+    if (i < 0 || i >= (NSInteger)_keys.count || i == _index) return;
+    NSString *k = [_keys objectAtIndex:i];
+    [_keys removeObjectAtIndex:i];
+    if (_shuffle && _orig) [_orig removeObject:k];
+    if (i < _index) _index--;
+    [self queueChanged];
+}
+
+- (void)moveFrom:(NSInteger)from to:(NSInteger)to {
+    if (from < 0 || from >= (NSInteger)_keys.count || to < 0 || to >= (NSInteger)_keys.count || from == to) return;
+    NSString *k = [_keys objectAtIndex:from];
+    [_keys removeObjectAtIndex:from];
+    [_keys insertObject:k atIndex:to];
+    // Tính lại vị trí bài đang phát theo phép dời (một bài có thể có hai lần trong hàng — indexOfObject: sẽ trỏ nhầm)
+    if (from == _index) _index = to;
+    else if (from < _index && to >= _index) _index--;
+    else if (from > _index && to <= _index) _index++;
+    [self queueChanged];
+}
+
+- (void)setShuffle:(BOOL)shuffle {
+    if (shuffle == _shuffle) return;
+    _shuffle = shuffle;
+    NSString *cur = [self currentKey];
+    if (!cur) {
+        [self notify];
+        return;
+    }
+    if (shuffle) {
+        _orig = [_keys mutableCopy];
+        NSMutableArray *rest = [_keys mutableCopy];
+        [rest removeObjectAtIndex:_index];
+        for (NSUInteger k = rest.count; k > 1; k--) [rest exchangeObjectAtIndex:k - 1 withObjectAtIndex:arc4random_uniform((u_int32_t)k)];
+        [rest insertObject:cur atIndex:0];
+        _keys = rest;
+        _index = 0;
+    } else if (_orig.count) {
+        _keys = _orig;
+        _orig = nil;
+        NSUInteger at = [_keys indexOfObject:cur];
+        _index = at == NSNotFound ? 0 : at;
+    }
+    [self queueChanged];
+}
+
+- (void)setRepeat:(GMRepeatMode)repeat {
+    _repeat = repeat;
+    [self queueChanged];
+}
+
+- (void)remoteEvent:(UIEvent *)e {
+    if (e.type != UIEventTypeRemoteControl) return;
+    switch (e.subtype) {
+        case UIEventSubtypeRemoteControlPlay: [self play]; break;
+        case UIEventSubtypeRemoteControlPause: [self pause]; break;
+        case UIEventSubtypeRemoteControlStop: [self pause]; break;
+        case UIEventSubtypeRemoteControlTogglePlayPause: [self togglePlay]; break;
+        case UIEventSubtypeRemoteControlNextTrack: [self next]; break;
+        case UIEventSubtypeRemoteControlPreviousTrack: [self previous]; break;
+        default: break;
+    }
+}
+
+#pragma mark - Hẹn giờ tắt
+
+- (void)setSleepMinutes:(NSInteger)minutes {
+    [_sleepTimer invalidate];
+    _sleepTimer = nil;
+    _sleepEnd = minutes < 0;
+    // «Hết bài này»: bỏ bài nạp sẵn để hết bài là dừng hẳn (AVQueuePlayer không tự sang bài kế); tắt hẹn thì nạp lại
+    if (_sleepEnd) [self dropNext];
+    else [self preloadNext];
+    if (minutes > 0) {
+        _sleepTimer = [NSTimer scheduledTimerWithTimeInterval:minutes * 60.0 target:self selector:@selector(sleepFired)
+                                                     userInfo:nil repeats:NO];
+    }
+    [self notify];
+}
+
+- (void)sleepFired {
+    _sleepTimer = nil;
+    GMLog(@"hẹn giờ tắt: dừng phát");
+    [self pause];
+}
+
+- (NSTimeInterval)sleepRemaining {
+    if (_sleepEnd) return -1;
+    if (!_sleepTimer) return 0;
+    return MAX(1, [_sleepTimer.fireDate timeIntervalSinceNow]);
+}
+
+#pragma mark - Màn hình khoá
+
+- (void)updateNowPlaying {
+    NSDictionary *s = self.current;
+    Class center = NSClassFromString(@"MPNowPlayingInfoCenter");
+    if (!center) return;
+    if (!s) {
+        [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo = nil;
+        return;
+    }
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+    [d setObject:[s objectForKey:@"title"] ?: @"" forKey:MPMediaItemPropertyTitle];
+    NSString *artist = [s objectForKey:@"artist"];
+    if ([artist isKindOfClass:[NSString class]] && artist.length) [d setObject:artist forKey:MPMediaItemPropertyArtist];
+    NSString *src = [s objectForKey:@"src"];
+    if (![src isKindOfClass:[NSString class]]) src = @"";
+    // Dòng thứ ba trên màn hình khoá: «1:23 / 4:05 · nguồn» — màn hình khoá iOS 5 / 6 không vẽ thanh tiến trình cho app ngoài
+    // (chỉ app Nhạc có; thanh cho mọi app từ iOS 7) nên ghi thời gian thành chữ, tick cập nhật mỗi giây khi máy khoá
+    double pos = self.position, dur = self.duration;
+    _lockSec = (NSInteger)pos;
+    NSString *times = dur > 0 ? [NSString stringWithFormat:@"%@ / %@", GMDuration(pos), GMDuration(dur)] : GMDuration(pos);
+    NSString *line3 = src.length ? [NSString stringWithFormat:@"%@ · %@", times, src] : times;
+    // Có tweak hiện thanh tiến trình (M20): dòng thứ ba chỉ là nguồn như thường
+    if ([GMLockState tweakShowsProgress]) line3 = src;
+    if (line3.length) [d setObject:line3 forKey:MPMediaItemPropertyAlbumTitle];
+    [d setObject:@(dur) forKey:MPMediaItemPropertyPlaybackDuration];
+    [d setObject:@(pos) forKey:MPNowPlayingInfoPropertyElapsedPlaybackTime];
+    [d setObject:@(_player.rate) forKey:MPNowPlayingInfoPropertyPlaybackRate];
+    NSString *key = [s objectForKey:@"key"];
+    BOOL fetch = NO;
+    if (_artwork && [_artworkKey isEqual:key]) {
+        if (!_artworkItem) _artworkItem = [[MPMediaItemArtwork alloc] initWithImage:_artwork];
+        [d setObject:_artworkItem forKey:MPMediaItemPropertyArtwork];
+    } else if (![_artworkKey isEqual:key] && ![[s objectForKey:@"loading"] boolValue]) {
+        _artworkKey = key;
+        _artwork = nil;
+        _artworkItem = nil;
+        fetch = YES;
+    }
+    // Đặt trước khi hỏi ảnh bìa: ảnh có sẵn trong bộ đệm thì done chạy ngay và gọi lại hàm này (bản có ảnh không bị ghi đè)
+    [MPNowPlayingInfoCenter defaultCenter].nowPlayingInfo = d;
+    if (fetch) {
+        [GMImages cover:s size:300 done:^(UIImage *img) {
+            if (![_artworkKey isEqual:key]) return;
+            _artwork = img;
+            _artworkItem = nil;
+            [self updateNowPlaying];
+        }];
+    }
+}
+
+#pragma mark - Lưu / khôi phục («Nghe tiếp»)
+
+- (void)saveState {
+    _lastSave = GMNowMs();
+    NSString *cur = [self currentKey];
+    NSMutableDictionary *st = [NSMutableDictionary dictionary];
+    if (cur) {
+        // Giữ tối đa 3000 bài quanh bài đang phát
+        NSInteger a = MAX(0, _index - 500), b = MIN((NSInteger)_keys.count, a + 3000);
+        [st setObject:[_keys subarrayWithRange:NSMakeRange(a, b - a)] forKey:@"keys"];
+        [st setObject:@(_index - a) forKey:@"index"];
+        [st setObject:@(self.position) forKey:@"pos"];
+        NSDictionary *info = [_info objectForKey:cur];
+        if (info) {
+            // NSUserDefaults không nhận NSNull (JSON null) → bỏ các khoá null
+            NSMutableDictionary *clean = [NSMutableDictionary dictionary];
+            [info enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) {
+                if (v != [NSNull null]) [clean setObject:v forKey:k];
+            }];
+            [st setObject:clean forKey:@"info"];
+        }
+    }
+    [st setObject:@(_shuffle) forKey:@"shuffle"];
+    [st setObject:@(_repeat) forKey:@"repeat"];
+    [[NSUserDefaults standardUserDefaults] setObject:st forKey:@"player.state"];
+}
+
+- (void)restoreState {
+    NSDictionary *st = [[NSUserDefaults standardUserDefaults] objectForKey:@"player.state"];
+    if (![st isKindOfClass:[NSDictionary class]]) return;
+    _shuffle = [[st objectForKey:@"shuffle"] boolValue];
+    _repeat = [[st objectForKey:@"repeat"] integerValue];
+    NSArray *keys = [st objectForKey:@"keys"];
+    if (![keys isKindOfClass:[NSArray class]] || !keys.count) return;
+    _keys = [keys mutableCopy];
+    _index = MIN(MAX(0, [[st objectForKey:@"index"] integerValue]), (NSInteger)keys.count - 1);
+    _resumeAt = [[st objectForKey:@"pos"] doubleValue];
+    NSDictionary *info = [st objectForKey:@"info"];
+    if ([info isKindOfClass:[NSDictionary class]]) [_info setObject:info forKey:[self currentKey]];
+    // Cập nhật thông tin (tên / đã tải có thể đã đổi) — không phát
+    [self fetchAround:_index done:^{ [self notify]; }];
+    [self notify];
+}
+
+#pragma mark - Nền
+
+- (void)endBackgroundTask {
+    if (_bg != UIBackgroundTaskInvalid) {
+        [[UIApplication sharedApplication] endBackgroundTask:_bg];
+        _bg = UIBackgroundTaskInvalid;
+    }
+}
+
+- (void)didEnterBackground {
+    [self saveState];
+    [self updateNowPlaying];  // thời gian trên màn hình khoá đúng ngay lúc khoá máy
+    // Bài đang mở dở (chưa có tiếng) lúc xuống nền: iOS treo app trước khi tiếng chạy → xin thêm giờ tới khi phát được
+    if (_wantPlay && self.buffering && _bg == UIBackgroundTaskInvalid) {
+        _bg = [[UIApplication sharedApplication] beginBackgroundTaskWithExpirationHandler:^{ [self endBackgroundTask]; }];
+    }
+}
+
+- (void)willEnterForeground {
+    [self endBackgroundTask];
+    // Item hỏng / kẹt trong lúc ở nền → mở lại đúng chỗ
+    if (_wantPlay && _curItem && _curItem.status == AVPlayerItemStatusFailed) [self loadCurrent:YES at:self.position];
+    [self notify];
+}
+
+@end

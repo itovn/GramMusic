@@ -1,0 +1,15 @@
+/core/target/
+/keys/
+# Công cụ / ghi chú riêng trên máy anh (địa chỉ máy dựng, máy thử) — không lên git
+/tools-local/
+# Tệp phiên đăng nhập của gm-cli (có auth key) — không lên git
+gm-session*.json
+*.session.json
+/pc-data/
+# Thư mục dựng của Theos
+/app/.theos/
+/app/packages/
+# Tài liệu tham khảo (APK MeloVault, ghi chú)
+/Tham_Khao/
+# Gói phát hành (đưa lên GitHub Releases, không để trong git)
+/dist/

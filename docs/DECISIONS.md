@@ -1,0 +1,225 @@
+# GramMusic — Các quyết định kỹ thuật
+
+Thiết kế đầy đủ: [THIET-KE.md](THIET-KE.md). Các quyết định của GramMini (D1–D27) áp dụng cho phần chép sang (mạng, phiên, bộ
+dựng, giao diện) — ghi ở đây những gì riêng của GramMusic.
+
+## M1. Fork GramMini, giữ tên `gm-` / `GM` — 17/11/2026
+
+- Chép `core/vendor` (grammers vá), `core/patches`, `crates/gm-net`, `gm-core/src/session.rs`, khung `cache.rs` / `service.rs` /
+  `gm-ffi`, `tools/rust`, `tools-local/ios.sh`, app: GMCompat, GMShims, GMLog, GMCore, GMImages (rút gọn), GMTheme (thêm biểu
+  tượng nhạc), màn Đăng nhập / Proxy.
+- Không dùng chung (submodule): hai app đi hai nhịp phát hành; sửa lỗi phần chung thì chép tay (tên tệp / lớp giống nhau → so
+  khác biệt dễ).
+- Bundle `vn.grammusic.app`, dữ liệu `~/Library/GramMusic`, gói `.deb` không phụ thuộc mobilesubstrate (không cần tweak
+  thông báo).
+
+## M2. Thư viện = quét cả tài khoản (theo MeloVault) — 17/11/2026
+
+- MeloVault (phân tích APK 0.6.132): tìm kiếm toàn cục lọc âm thanh rồi lọc tài liệu có đuôi nhạc, trang 100, lưu con trỏ; mục
+  Nguồn lập từ chat của các bài tìm được. Người dùng không phải tự chọn chat — đúng thói quen «mở app là có nhạc».
+- GramMusic làm tương tự bằng `messages.searchGlobal` (gọi thẳng TL, không qua `GlobalSearchIter` của grammers — cần lưu / nạp lại
+  con trỏ `offset_rate` / `offset_peer` / `offset_id`). Tin nhắn đã lưu và kênh công khai thêm tay quét riêng bằng
+  `messages.search`.
+- Chỉ mục lưu JSON theo nguồn, ghi gộp 5 trang một lần (kênh lớn khỏi ghi lại cả tệp mỗi trang).
+
+## M3. Phát qua cổng HTTP nội bộ có Range, tệp thưa + bảng khúc — 17/11/2026
+
+- MeloVault (TDLib) tải tuần tự từ đầu và đọc tệp đang lớn dần → tua tới chỗ chưa tải phải chờ. GramMusic lấy khúc 256 KB đúng
+  chỗ trình phát cần (`upload.getFile` theo offset) → tua ngay; bài nghe trọn thành tệp đầy đủ trong đệm.
+- Cổng phát viết bằng Rust trong lõi (không phải ObjC như TubeMini): dữ liệu nằm sẵn ở lõi, thử được trên PC bằng `cargo test`.
+
+## M4. AVQueuePlayer + nạp sẵn bài kế — 17/11/2026
+
+- iOS 6 không cho app ở nền *bắt đầu* phát khi tiếng đã dừng (TubeMini D34). Hết bài mà phải tạo item mới → có quãng im → iOS có
+  thể treo app. Nạp sẵn bài kế vào hàng của AVQueuePlayer ngay khi bài đang phát sẵn sàng → AVQueuePlayer tự chuyển, tiếng không
+  đứt.
+- **Chưa thử trên máy thật** (cần máy dựng) — mục kiểm thử bắt buộc: khoá màn, nghe liền 10 bài trên iPhone 5 và iPad 1.
+
+## M5. FLAC / OGG / Opus để giai đoạn 2 — 17/11/2026
+
+- AVPlayer iOS 5 / 6 không phát. Bản đầu vẫn đưa vào thư viện (nhãn đỏ, bấm thì báo) để người dùng thấy đủ bài; giai đoạn 2 giải
+  mã trong lõi, cổng phát trả WAV.
+
+## M6. Biểu tượng theo mẫu anh đưa — 17/11/2026
+
+- Anh yêu cầu biểu tượng kết hợp logo Telegram với âm nhạc. Em báo điều khoản Telegram API mục 2.4: «You must not use the official
+  Telegram logo for your app» (GramMini D14 cũng vì vậy mà tự vẽ) và vẽ thử một bản tự làm (nốt nhạc có móc là máy bay giấy).
+- Anh chốt theo mẫu `Tham_Khao/logo/logo1.png`: ô vuông bo góc viền crôm kiểu iOS 6, nền kính xanh sọc chéo, máy bay giấy trắng
+  giữa tai nghe, nốt nhạc nhiều màu, khoá Sol, sóng âm. `tools/icon/make_icon.py from-ref …` cắt đúng ô biểu tượng (mép ngoài viền
+  đo bằng độ sáng, lùi 3 px bỏ viền tối của nền), góc ngoài trong suốt (bán kính 21,6 % > mặt nạ iOS ~17,5 %) → các cỡ iOS 5 / 6.
+- Rủi ro còn lại (anh đã biết): máy bay giấy trong mẫu giống hình máy bay của logo Telegram. Bố cục khác hẳn logo (tai nghe, nốt
+  nhạc, sóng âm, ô vuông viền crôm — không phải máy bay trắng trên đĩa xanh phẳng), tên app không có chữ «Telegram». Nếu Telegram
+  phàn nàn / khoá api_id thì thay máy bay bằng hình khác.
+
+## M7. Quét từng chat thay cho tìm toàn cục — 17/11/2026
+
+- Thử thật trên iPhone 5: `messages.searchGlobal` với từ khoá rỗng + bộ lọc âm thanh trả **0 tin**, bộ lọc tài liệu trả 5 tin (trả
+  hết một lần) — không dựng được thư viện (giả định ở M2 sai: MeloVault dùng `searchMessages` của TDLib).
+- Làm: đọc danh sách chat (`messages.getDialogs`, cả Lưu trữ), rồi `messages.search` trong **từng chat** (lượt âm thanh, lượt tài liệu
+  có đuôi nhạc). Quét toàn bộ ghi chat đã xong (`sync.json` → `done`) → tắt app giữa chừng thì quét tiếp; lấy bài mới chỉ quét chat
+  có tin mới từ lần trước (`chats`: lần quét của từng chat), trong chat dừng khi gặp 10 bài đã có hoặc tới tin cũ hơn lần quét
+  trước. Mở app (đã đăng nhập) tự lấy bài mới sau 3 giây; bản đổi dữ liệu quét (`VERSION`) tự quét toàn bộ lại một lần. Mỗi lần quét
+  cập nhật tên / ảnh / cờ «có chủ đề» của nguồn đã có.
+- iPhone 5: 7 chat quét hết trong 5,8 giây (một nhóm 315 tệp âm thanh + 102 tài liệu — 35 trong đó là nhạc). Bỏ tệp m3u / cue / lrc.
+
+## M8. FLAC / OGG Vorbis: lõi giải mã thành WAV 16 bit cho AVPlayer — 17/11/2026
+
+- Thư viện thật của anh: 240 / 377 bài là FLAC (64 %). AVPlayer iOS 5 / 6 không đọc FLAC; tự viết bộ phát AudioQueue (bỏ AVPlayer)
+  thì phải làm lại phát nền / hàng chờ / màn hình khoá → giữ AVPlayer, lõi đổi định dạng.
+- symphonia 0.5 (Rust thuần, `flac` + `ogg` + `vorbis`): tệp gốc đọc qua bộ đệm khúc (chờ tải khúc cần), WAV ghi vào tệp thưa + `.map`
+  như tệp gốc, URL đuôi `.wav`. Tua: symphonia tìm khung FLAC bằng tìm nhị phân theo đầu khung (không cần SEEKTABLE) → giải từ đó,
+  bỏ mẫu thừa → đúng từng mẫu. Hi-res chia tần số (96 → 48, 192 → 48 kHz), 24 bit → 16 bit, > 2 kênh → 2 kênh đầu. Giữ 3 bài đã giải
+  gần nhất.
+- PC (tệp mẫu `tests/data`, không có SEEKTABLE): WAV **khớp từng bit với ffmpeg** (SHA-256), đoạn tua trước = đúng đoạn đó của bản
+  giải tuần tự, hi-res / OGG đúng thông số.
+- iPhone 5: FLAC 6 phút 26 MB tải + giải cả bài trong 35 giây (~10 lần thời gian thực), phát nền (khoá màn) không giật; chuyển bài
+  FLAC sẵn sàng sau 94–121 ms; tua 0:12 → 4:00 có tiếng lại trong < 4 giây.
+- AVPlayer đọc WAV: 2 byte đầu, cả tệp, 5 KB cuối, rồi từng đoạn ~700 KB mỗi ~4 giây, nhiều kết nối. Cổng phát phải **biết khi
+  AVPlayer ngắt kết nối** lúc đang chờ dữ liệu (trước đó kết nối cũ treo → AVFoundation đứng luồng chính 9 giây khi chuyển bài).
+- Chưa: Opus (`gm-opus` của GramMini có libopus — khi cần), APE / WavPack / DSD / DTS (nhãn đỏ).
+
+## M9. Danh sách theo chủ đề nhóm, tạo list nhanh — 17/11/2026
+
+- Anh yêu cầu. Bài ghi chủ đề (đầu trả lời của tin: `forum_topic`, `reply_to_top_id` / `reply_to_msg_id` — như GramMini); nguồn ghi
+  cờ «có chủ đề» + danh sách chủ đề (`messages.getForumTopics`). Nguồn có chủ đề → màn Chủ đề (số bài từng chủ đề, «Tất cả bài của
+  nhóm», chạm để nghe riêng chủ đề); «Mỗi chủ đề thành một playlist» (tên «Nhóm · Chủ đề»; bấm lại thì thêm bài mới vào playlist cũ).
+- Tạo list nhanh: menu «⋯» của mọi danh sách — «Lưu danh sách / kết quả tìm thành playlist» (`pl.fromQuery`: lõi tự lấy khoá theo
+  đúng bộ lọc, khỏi chuyển 5000 khoá qua lại), «Chọn nhiều bài…» (phát, phát tiếp theo, thêm vào playlist, tạo playlist mới, tải về
+  máy); Hàng chờ → «Lưu hàng chờ thành playlist».
+- iPhone 5: nhóm «GramMusic» 15 chủ đề có nhạc / 374 bài; `pl.fromQuery` một chủ đề → đủ 14 bài.
+
+## M10. Tải theo nhịp nghe — 17/11/2026
+
+- Anh yêu cầu: tệp lớn (100 MB) phát sớm, tải tiếp trong lúc nghe, dừng nghe thì thôi tải. Trước đó: đang nghe là tải dồn cả bài
+  (AVPlayer kéo trước tới ~33 MB sau vài giây), tạm dừng vẫn tải tiếp vì AVPlayer giữ kết nối.
+- App báo vị trí đang phát (`play.pos`: mỗi giây khi phát; lúc dừng, tua, đổi bài). Lõi chỉ tải / trả dữ liệu tới **60 giây** trước
+  chỗ đang phát (`AHEAD_SECS`, tối thiểu 1 MB); kết nối xin đoạn xa hơn thì chờ (vẫn theo dõi ngắt kết nối); luồng giải FLAC cũng chờ ở
+  mép. Bài chưa tới lượt (AVQueuePlayer nạp sẵn bài kế): 2 MB đầu. Cuối tệp (1 MB) luôn được đọc — AVPlayer đọc thử lúc mở. «Tải về
+  máy» vẫn tải trọn.
+- iPhone 5, MP3 156,6 MB (1 giờ 30): nghe 18 giây → đã tải 2,8 MB; tạm dừng 20 giây → vẫn 2,8 MB; phát tiếp 30 giây → 3,5 MB; phát
+  liền mạch.
+
+## M11. Thông số tệp trên màn Đang phát — 17/11/2026
+
+- Anh yêu cầu (ảnh mẫu: MP3 · 44.1kHz · 320 kbps · 324,0 MB). Lõi đọc phần đầu tệp **đã có trên máy** (không tải thêm): MP3 (khung
+  đầu sau ID3v2: tần số, kbit/s CBR; có Xing / VBRI → VBR, hiện «~» + bitrate trung bình), FLAC (STREAMINFO: tần số, bit), WAV (fmt),
+  OGG (đầu Vorbis), M4A (mục mô tả mẫu: «alac» → ALAC lossless, «mp4a» → AAC). Thiếu thì bitrate trung bình = cỡ × 8 / thời lượng.
+- App: hàng ô bo tròn dưới tên bài — định dạng (lossless tô màu chủ đạo) · tần số · bit (lossless / khác 16) · bitrate · dung lượng;
+  khúc đầu chưa tải thì hỏi lại sau 2 giây. iPhone 5: «FLAC · 44.1kHz · 16-bit · 606 kbps · 25,9 MB», «MP3 · 48kHz · ~241 kbps ·
+  156,6 MB».
+
+## M12. Tuỳ chọn «Tải trước» trong Cài đặt — 17/11/2026
+
+- Anh yêu cầu. Cài đặt → Phát nhạc → **Tải trước**: 30 giây / 1 phút (mặc định, như M10) / 2 phút / 5 phút / Cả bài. Lõi giữ số giây
+  (`settings.json` → `ahead_secs`, 0 = cả bài) và dùng ngay cho bài đang phát (đánh thức kết nối đang chờ, tải thêm cho đủ khoảng mới).
+  «Cả bài» = giới hạn bằng cỡ tệp (tải hết khi đang nghe; vẫn thôi tải khi trình phát ngừng đọc — như trước M10).
+- Lệnh `settings.get` / `settings.set` (chung cho các tuỳ chọn của lõi: `ahead_secs`, `lyrics`).
+
+## M13. Opus: libopus của GramMini + bộ đọc Ogg tự viết — 17/11/2026
+
+- symphonia 0.5 chưa giải Opus. Dùng lại `gm-opus` (libopus 1.4, đã chạy trên iOS 6 trong GramMini), tự đọc Ogg (`oggopus.rs`): trang
+  (kiểm CRC), ghép gói qua nhiều trang, chỉ luồng có OpusHead; tổng số mẫu = granule trang cuối − pre-skip.
+- Tua: tìm nhị phân theo granule tới trang kết thúc trước điểm cần **80 ms** (Opus cần «làm nóng» bộ giải — RFC 7845), giải từ gói
+  nối tiếp trang đó, bỏ mẫu thừa theo mốc → đúng từng mẫu. Lõi giải mã tách thành nguồn mẫu chung (`Src`: symphonia cho FLAC / Vorbis,
+  Opus) — phần ghi WAV, nhịp nghe, tua giữ nguyên.
+- Đuôi `.opus` → Opus; `.ogg` / `.oga` → xem trang đầu có OpusHead không. Luôn 48 kHz; 1–2 kênh (Opus nhiều kênh chưa làm).
+- Thử trên PC (`ogg_opus_exact_length_aligned_and_seek`): 960 000 mẫu đúng như ffmpeg (bỏ pre-skip 312), khớp pha sóng sin (lệch
+  pre-skip sẽ ra nhiễu lớn), đoạn giải sau khi tua lệch < 600 / 32768 so với giải tuần tự. iPhone 5: tệp Opus 20 giây giải hết 1,7 giây.
+
+## M14. Lời bài hát từ LRCLIB, phải bật mới gửi — 17/11/2026
+
+- **LRCLIB** (lrclib.net): miễn phí, không cần khoá, nhiều lời chạy theo thời gian (LRC). Lõi gọi HTTPS (reqwest + rustls + bộ chứng
+  chỉ gốc đóng sẵn — iOS 5 / 6 không tự vào được trang HTTPS mới; ring vá armv7 như GramMini, cùng phiên bản reqwest / ring / rustls).
+- **Riêng tư**: gửi tên bài, ca sĩ, thời lượng của bài đang xem lời tới LRCLIB → mặc định **tắt**; bật ở Cài đặt (hoặc chạm «Chạm để
+  bật» trong khung lời) có hộp hỏi nói rõ gửi gì. Bản đã lưu (`lyrics/<khoá>.json`) vẫn hiện khi tắt (không gửi gì).
+- Tìm: `api/get` (tên + ca sĩ chính + thời lượng ±2 giây) với tên gốc rồi tên bỏ phần trong ngoặc («(Official MV)», «[FLAC]», số thứ
+  tự); không thấy thì `api/search` chọn bản lệch thời lượng ≤ 5 giây, ưu tiên lời chạy. Có lời giữ mãi; không thấy 7 ngày sau mới hỏi
+  lại.
+- App: nút «Lời» trên màn Đang phát (hoặc chạm ảnh bìa) — khung lời đè lên ảnh bìa (phủ tối, chữ trắng); lời chạy tô dòng đang hát,
+  tự cuộn (anh tự cuộn thì 4 giây sau mới cuộn theo), chạm dòng để tua; lời thường cuộn tay.
+- Thư viện của anh chủ yếu nhạc Hoa / Việt — LRCLIB có ít (một bài Hoa đem thử không có); bài tiếng Anh phổ biến có đủ lời chạy (thử trên
+  PC: «Hello — Adele» 48 dòng, 0,6 giây).
+
+## M15. Nhạc trên máy: app Nhạc + tệp trong máy — 17/11/2026
+
+- **Nguồn → Trên máy**: «Nhạc trên máy» (thư viện app Nhạc — bài chép từ iTunes; MediaPlayer, iOS 5 / 6 không hỏi quyền) và «Tệp
+  trên máy» (duyệt thư mục như GramMini, chỉ hiện thư mục + tệp phát được; chạm một tệp → phát cả thư mục từ tệp đó).
+- Khoá `ipod:<persistentID>`: app tự lo (tên, ảnh bìa, `assetURL` cho AVPlayer); bài DRM / chưa tải từ iCloud không có assetURL → nhãn
+  đỏ, báo không phát được. Khoá `file:<đường dẫn>`: lõi lo (`local.rs`) — tên / ca sĩ theo tên tệp, thời lượng đọc từ đầu / cuối tệp
+  (FLAC STREAMINFO, Xing / CBR của MP3, granule Ogg, mvhd của M4A, WAV); mp3 / m4a / wav… → `file://`, FLAC / OGG / Opus → lõi giải
+  từ tệp trên máy qua cổng phát như bài Telegram (khoá nội bộ `local_<băm đường dẫn + cỡ + giờ sửa>`).
+- Bài trên máy không có Yêu thích / Playlist / Tải về / Nghe gần đây (các danh sách của lõi chỉ giữ bài Telegram) — nút mờ đi; vẫn
+  vào hàng chờ, phát nền, lời bài hát (gửi kèm tên / ca sĩ / thời lượng).
+- iPhone 5: Opus, FLAC 16/44,1 và 24/96, OGG Vorbis, mp3 từ `Documents` đều phát; «Ca si - Bai mp3.mp3» → tên «Bai mp3», ca sĩ «Ca si».
+
+## M16. Tạo AVPlayerItem ở nền — 17/11/2026
+
+- Đo trên iPhone 5: `[AVPlayerItem playerItemWithURL:]` + gắn vào trình phát **đứng luồng chính 5,6–9,3 giây** khi mở bài FLAC chưa
+  có trên máy: AVPlayer đọc thử cả cuối tệp WAV ngay lúc tạo item, lõi phải tải phần cuối tệp FLAC từ Telegram rồi giải mới trả được.
+  Đây là vụ «luồng chính đứng ~5 giây» ghi ở PROGRESS hôm trước.
+- Sửa: `AVURLAsset` + `loadValuesAsynchronouslyForKeys:@[playable, duration, tracks]` (đọc ở luồng nền) rồi mới tạo item trên luồng
+  chính — cả bài kế nạp sẵn. Lần đo sau: «nạp tệp 511 ms (nền), gắn item 6 ms».
+- Kèm: ảnh bìa lấy lỗi (mất mạng) nhớ 30 giây mới hỏi lại — danh sách vẽ lại mỗi giây theo trình phát, trước đó hỏi lõi ~3 lần / giây.
+
+## M17. DNS mã hoá (DoH / DoT) — chép từ ChimToTV — 17/11/2026
+
+- Anh hỏi có DoH / DoT như GramMini không: GramMini **không có**; phần này ở ChimToTV (`linux/core/src/doh.rs`) / Côn Bằng TV. Anh
+  đưa mã hồ sơ NextDNS riêng cho GramMusic → `keys/nextdns.txt` (không lên git; `sync.sh` chép lên máy dựng; `gm-net/build.rs` đóng
+  vào tệp chạy, không in ra nhật ký — `scrub`).
+- `gm-net/src/dns.rs`: chuỗi **DoH** NextDNS → Cloudflare → Google rồi **DoT** cùng thứ tự; máy chủ gọi bằng IP cố định; NextDNS dùng
+  máy chủ gần nhất (hỏi chính NextDNS «dns.nextdns.io», nhớ 6 giờ); giữ kết nối TLS để dùng lại; máy chủ lỗi nghỉ 2 phút; NXDOMAIN là
+  trả lời thật; hồ sơ chặn bằng 0.0.0.0 thì hỏi máy chủ sau; lỗi hết thì **DNS của máy** (app không bao giờ hỏng vì DNS mã hoá bị
+  chặn). Khác ChimToTV: chứng chỉ gốc **đóng sẵn** (webpki-roots — kho của iOS 5 / 6 cũ), bỏ phần «vượt chặn», bỏ regex / futures.
+- Dùng cho mọi tên miền lõi tự tra: MTProxy / SOCKS5 ghi bằng tên miền (`connector.rs`, `socks5.rs`), reqwest (lrclib.net — bộ tra
+  `DohResolve`), OTA sau này. Telegram đi thẳng nối bằng IP nên không qua đây.
+- Cài đặt → **DNS mã hoá** (mặc định bật; `settings.json` → `secure_dns`). Lệnh thử `net.dns` (`host`, `fail` — giả chặn máy chủ).
+- Đo: PC — 6 máy chủ đều trả lời 93–149 ms. **iPad 1 (iOS 5.1.1, A4)**: NextDNS gần nhất ở Việt Nam, `lrclib.net` qua DoH NextDNS
+  157 ms; giả chặn hết DoH → DoT NextDNS 214 ms; giả chặn cả 6 → DNS của máy; tên miền không có → `NO_DOMAIN`.
+
+## M18. Màn hình khoá iOS 5 / 6: thời gian chạy thành chữ — 17/11/2026
+
+- Anh báo màn hình khoá thiếu thanh tiến trình và nút ⏯ ⏮ ⏭. iOS 5 / 6: thanh tiến trình trên màn hình khoá chỉ có cho app Nhạc
+  (mọi app từ iOS 7; kéo để tua từ iOS 9.1 — `MPRemoteCommandCenter`), TubeMini đã thử: không thấy. Nút ⏮ ⏯ ⏭ không hiện sẵn: **bấm
+  Home 2 lần** khi đang khoá (hoặc thanh đa nhiệm, vuốt sang phải) — GramMusic đã nhận nút (`beginReceivingRemoteControlEvents`,
+  ⏮ / ⏭ = bài trước / bài sau).
+- Làm được trong app: dòng thứ ba trên màn hình khoá (dòng album) ghi **«1:23 / 4:05 · nguồn»**, cập nhật mỗi giây khi máy khoá / app ở
+  nền (giữ sẵn `MPMediaItemArtwork` để khỏi tạo lại ảnh mỗi giây).
+- Thanh tiến trình thật / nút hiện sẵn trên màn hình khoá cần tweak SpringBoard (như GMNotify của GramMini) — chờ anh quyết.
+
+## M19. Lời bài hát: ưu tiên lời chạy, căn giữa dòng đang hát — 17/11/2026
+
+- Anh báo lời không chạy theo nhạc trên iPhone 5. Nguyên nhân: bài anh mở (một bài saxophone có hát kèm) LRCLIB `api/get`
+  trả bản **chỉ có lời thường** (không mốc thời gian); hai bài khác là bài không lời. Sửa: `api/get` không có lời chạy thì tìm thêm
+  (`api/search` theo cặp, rồi «tên bài ca sĩ») bản **có lời chạy** cùng thời lượng (±5 giây) — bài đó ra 43 dòng lời chạy. Bản
+  lưu: lời chạy / bài không lời giữ mãi; lời thường / không thấy 7 ngày hỏi lại; bản lưu cũ (chưa có `"v": 2`) hỏi lại ngay.
+- Lời thường: khung ghi «Lời chưa có mốc thời gian — cuộn tay để xem».
+- iPad 1: `scrollToRowAtIndexPath:…Middle` của iOS 5 đặt dòng đang hát sát mép trên khi bảng có `contentInset` → tự tính độ cuộn cho
+  dòng nằm giữa khung. Thử bằng tệp «Adele - Hello.mp3» (LRCLIB có lời chạy): dòng đậm chạy theo nhạc, nằm giữa khung.
+
+## M20. Tweak GramLockControl — điều khiển + lời bài hát trên màn hình khoá (anh đồng ý 17/11/2026) — 17/11/2026
+
+- Anh đặt tên **GramLockControl**, muốn bật / tắt được trong Cài đặt của iPhone (phòng xung đột với tweak khác), và hiện cả **lời bài
+  hát** trên màn hình khoá. Làm như GMNotify của GramMini (D18): `tweak/GramLockControl` là dự án con của app, cùng gói
+  `vn.grammusic.app` (phụ thuộc `mobilesubstrate`, `preferenceloader`); lần đầu cài cần khởi động lại SpringBoard.
+- Trong SpringBoard: móc `-[SBAwayView didMoveToWindow]` (lớp tự có) và `layoutSubviews` (lớp không có → thêm hàm vào lớp, gọi hàm của
+  lớp cha lúc chạy — không đụng UIView của view khác); thiếu lớp thì đứng ngoài. Khung nằm ngay trên thanh «trượt để mở khoá»
+  (`SBAwayLockBar`, chèn dưới thanh để bàn phím mật mã che được): dòng lời đang hát + dòng kế, thanh tiến trình kéo để tua, nút bài
+  trước / phát / bài sau. Chỉ hiện khi GramMusic là app đang phát (`SBMediaController nowPlayingApplication`).
+- App ↔ tweak: app ghi `~/Library/GramMusic/lockstate.plist` (bài, vị trí lúc ghi, đang phát?, lời chạy) khi đổi bài / phát–dừng / tua
+  và báo Darwin `vn.grammusic.lockcontrol/state`; tweak tự cộng thời gian trôi. Phát / dừng / bài trước–sau qua `SBMediaController`
+  (đánh thức được app đang treo ở nền), dự phòng `…/cmd.toggle|next|prev`; tua `…/cmd.seek` + `notify_set_state` (mili giây).
+- Cài đặt của iPhone → GramLockControl (PreferenceLoader, plist): Bật (tắt là gỡ khung, không làm gì nữa), Lời bài hát, Thanh tiến
+  trình, Nút điều khiển.
+- Thử: iPad 1 (iOS 5.1.1) và iPhone 5 (iOS 6.1.4) — nạp được, tìm thấy `SBAwayView` + `SBAwayLockBar`, gắn khung, SpringBoard không lỗi;
+  iOS 6 có đủ `SBMediaController` (nowPlayingApplication, togglePlayPause, changeTrack:), `SBAwayController` (restartDimTimer,
+  isDimmed).
+- **Bài học**: không khoá máy từ xa bằng `-[SBAwayController lock]` trên iOS 6 — chỉ bật cờ «đã khoá» mà không hiện màn hình khoá,
+  SpringBoard kẹt, nút Home không ăn (anh báo máy đơ; gỡ bằng khởi động lại SpringBoard). Đã bỏ lệnh thử đó; màn hình khoá thử bằng tay.
+- Sau khi anh thử (17/11, iPhone 5): lời trên màn hình khoá hiện đúng. Sửa thêm:
+  - Tên bài phía trên màn hình khoá **giật**: app cập nhật `nowPlayingInfo` mỗi giây (M18) → iOS 6 vẽ lại cả cụm tên bài, chữ chạy của
+    tên dài bị đặt lại từ đầu. Có tweak hiện thanh tiến trình thì app thôi ghi thời gian vào dòng thứ ba và chỉ cập nhật khi đổi bài /
+    phát–dừng / tua; không có tweak thì 10 giây một lần.
+  - «Mất lời» với hai bài saxophone: LRCLIB có 20 bản ghi mỗi bài, **tất cả đánh dấu không lời** — đúng là nhạc
+    không lời. Khung màn hình khoá giờ ghi «♪ Nhạc không lời» thay vì để trống.
+  - Lõi: khung lời trong app và màn hình khoá cùng hỏi một bài → gộp thành một lần (khoá theo bài, bên sau đọc bản đã lưu); kết nối
+    HTTPS nghỉ quá 20 giây thì bỏ (một lần tra mất 21 giây vì dùng lại kết nối đã chết khi mạng iPhone chập chờn).

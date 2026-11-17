@@ -1,0 +1,262 @@
+GramMini: cho lõi tự mở kết nối tới DC (MTProxy / SOCKS5 / obfuscated2) — grammers-mtsender 0.12.0
+- ConnectionParams::connector (Arc<dyn Connector>, biết số DC), ServerAddr::Custom
+- NetStream giữ hai nửa đọc / ghi dạng hộp (nhận mọi luồng byte), TCP bật nodelay
+
+--- a/src/configuration.rs
++++ b/src/configuration.rs
+@@ -8,11 +8,13 @@
+ 
+ use std::num::{NonZeroU32, NonZeroUsize};
+ use std::ops::ControlFlow;
++use std::sync::Arc;
+ use std::time::Duration;
+ 
+ use grammers_mtproto::transport::{self, Transport};
+ 
+ use crate::errors::{InvocationError, RpcError};
++use crate::net::Connector;
+ 
+ const DEFAULT_LOCALE: &str = "en";
+ 
+@@ -68,6 +70,11 @@
+ 
+     pub transport: Box<TransportFactory>,
+ 
++    /// GramMini patch: when set, every connection to a datacenter is opened by this
++    /// [`Connector`] (which knows the datacenter id) instead of a plain TCP socket.
++    /// Takes precedence over `proxy_url`.
++    pub connector: Option<Arc<dyn Connector>>,
++
+     #[doc(hidden)]
+     pub __non_exhaustive: (),
+ }
+@@ -155,6 +162,7 @@
+             retry_policy: Box::new(super::AutoSleep::default()),
+             updates_channel_capacity: NonZeroUsize::new(100).unwrap(),
+             transport: Box::new(|| Box::new(transport::Full::new())),
++            connector: None,
+             __non_exhaustive: (),
+         }
+     }
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -34,7 +34,7 @@
+     AutoSleep, ConnectionParams, NoRetries, RetryContext, RetryPolicy, UpdatesConfiguration,
+ };
+ pub use errors::{InvocationError, ReadError, RpcError};
+-pub use net::ServerAddr;
++pub use net::{AsyncReadWrite, BoxedStream, ConnectFuture, Connector, ServerAddr};
+ pub use sender::{Sender, connect, connect_with_auth, generate_auth_key};
+ pub use sender_pool::{SenderPool, SenderPoolFatHandle, SenderPoolHandle, SenderPoolRunner};
+ pub use updates_receiver::UpdatesReceiver;
+--- a/src/sender.rs
++++ b/src/sender.rs
+@@ -181,7 +181,7 @@
+     pub async fn step(&mut self) -> Result<Vec<UpdatesLike>, ReadError> {
+         self.try_fill_write();
+ 
+-        let (mut reader, mut writer) = self.stream.split();
++        let (reader, writer) = self.stream.split();
+         let sleep = sleep_until(self.next_ping);
+         let (read, write) = self.state.io_buffers();
+ 
+--- a/src/sender_pool.rs
++++ b/src/sender_pool.rs
+@@ -420,16 +420,23 @@
+             dc_option.ipv4.into()
+         };
+ 
++        let connector = self.connection_params.connector.clone();
++        let dc_id = dc_option.id;
+         #[cfg(feature = "proxy")]
+         let addr = || {
+-            if let Some(proxy) = self.connection_params.proxy_url.clone() {
++            if let Some(connector) = connector.clone() {
++                ServerAddr::Custom { dc_id, address, connector }
++            } else if let Some(proxy) = self.connection_params.proxy_url.clone() {
+                 ServerAddr::Proxied { address, proxy }
+             } else {
+                 ServerAddr::Tcp { address }
+             }
+         };
+         #[cfg(not(feature = "proxy"))]
+-        let addr = || ServerAddr::Tcp { address };
++        let addr = || match connector.clone() {
++            Some(connector) => ServerAddr::Custom { dc_id, address, connector },
++            None => ServerAddr::Tcp { address },
++        };
+ 
+         let init_connection = tl::functions::InvokeWithLayer {
+             layer: tl::LAYER,
+--- a/src/net/mod.rs
++++ b/src/net/mod.rs
+@@ -8,8 +8,34 @@
+ 
+ mod tcp;
+ 
++use std::future::Future;
++use std::net::SocketAddr;
++use std::pin::Pin;
++use std::sync::Arc;
++
++use tokio::io::{AsyncRead, AsyncWrite};
++
+ pub use tcp::NetStream;
+ 
++/// A bidirectional byte stream (GramMini patch).
++pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + Unpin {}
++impl<T: AsyncRead + AsyncWrite + Send + Unpin> AsyncReadWrite for T {}
++
++/// Boxed bidirectional byte stream returned by a [`Connector`] (GramMini patch).
++pub type BoxedStream = Box<dyn AsyncReadWrite>;
++
++/// Future returned by [`Connector::connect`] (GramMini patch).
++pub type ConnectFuture<'a> = Pin<Box<dyn Future<Output = std::io::Result<BoxedStream>> + Send + 'a>>;
++
++/// Opens the byte stream used to talk to a datacenter (GramMini patch).
++///
++/// Lets the application decide how to reach `dc_id` (whose address is `address`): directly,
++/// through a SOCKS5 / Shadowsocks proxy, or through an MTProxy with its obfuscation / fake-TLS
++/// layers. The returned stream carries the bytes produced by the configured transport as-is.
++pub trait Connector: Send + Sync + std::fmt::Debug {
++    fn connect(&self, dc_id: i32, address: SocketAddr) -> ConnectFuture<'_>;
++}
++
+ /// Represents a socket address which may be proxied.
+ #[derive(Debug, Clone)]
+ pub enum ServerAddr {
+@@ -21,4 +47,10 @@
+     },
+     /// Proxy address for direct connection.
+     Tcp { address: std::net::SocketAddr },
++    /// Connection opened by an application-provided [`Connector`] (GramMini patch).
++    Custom {
++        dc_id: i32,
++        address: std::net::SocketAddr,
++        connector: Arc<dyn Connector>,
++    },
+ }
+--- a/src/net/tcp.rs
++++ b/src/net/tcp.rs
+@@ -6,32 +6,54 @@
+ // option. This file may not be copied, modified, or distributed
+ // except according to those terms.
+ 
+-use tokio::io::AsyncWriteExt;
++use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+ use tokio::net::TcpStream;
+-pub use tokio::net::tcp::{ReadHalf, WriteHalf};
+ use tracing::info;
+ 
+ use super::ServerAddr;
+ 
+-pub enum NetStream {
+-    Tcp(TcpStream),
+-    #[cfg(feature = "proxy")]
+-    ProxySocks5(tokio_socks::tcp::Socks5Stream<TcpStream>),
++/// GramMini patch: the stream is kept as two boxed halves so that any byte stream
++/// (plain TCP, SOCKS5, or one opened by a [`super::Connector`]) can be used.
++pub struct NetStream {
++    reader: Box<dyn AsyncRead + Send + Unpin>,
++    writer: Box<dyn AsyncWrite + Send + Unpin>,
+ }
+ 
+ impl NetStream {
+-    pub(crate) fn split(&mut self) -> (ReadHalf<'_>, WriteHalf<'_>) {
+-        match self {
+-            Self::Tcp(stream) => stream.split(),
+-            #[cfg(feature = "proxy")]
+-            Self::ProxySocks5(stream) => stream.split(),
++    fn from_tcp(stream: TcpStream) -> Self {
++        let _ = stream.set_nodelay(true);
++        let (reader, writer) = stream.into_split();
++        Self {
++            reader: Box::new(reader),
++            writer: Box::new(writer),
+         }
+     }
+ 
++    pub(crate) fn split(
++        &mut self,
++    ) -> (
++        &mut (dyn AsyncRead + Send + Unpin),
++        &mut (dyn AsyncWrite + Send + Unpin),
++    ) {
++        (&mut *self.reader, &mut *self.writer)
++    }
++
+     pub(crate) async fn connect(addr: &ServerAddr) -> Result<Self, std::io::Error> {
+         info!("connecting...");
+         match addr {
+-            ServerAddr::Tcp { address } => Ok(NetStream::Tcp(TcpStream::connect(address).await?)),
++            ServerAddr::Tcp { address } => Ok(Self::from_tcp(TcpStream::connect(address).await?)),
++            ServerAddr::Custom {
++                dc_id,
++                address,
++                connector,
++            } => {
++                let stream = connector.connect(*dc_id, *address).await?;
++                let (reader, writer) = tokio::io::split(stream);
++                Ok(Self {
++                    reader: Box::new(reader),
++                    writer: Box::new(writer),
++                })
++            }
+             #[cfg(feature = "proxy")]
+             ServerAddr::Proxied { address, proxy } => {
+                 Self::connect_proxy_stream(address, proxy).await
+@@ -82,36 +104,31 @@
+             Host::Ipv6(v6) => SocketAddr::new(IpAddr::from(v6), port),
+         };
+ 
+-        match scheme {
++        let stream = match scheme {
+             "socks5" => {
+                 if username.is_empty() {
+-                    Ok(NetStream::ProxySocks5(
+-                        tokio_socks::tcp::Socks5Stream::connect(socks_addr, addr)
+-                            .await
+-                            .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?,
+-                    ))
+-                } else {
+-                    Ok(NetStream::ProxySocks5(
+-                        tokio_socks::tcp::Socks5Stream::connect_with_password(
+-                            socks_addr, addr, username, password,
+-                        )
++                    tokio_socks::tcp::Socks5Stream::connect(socks_addr, addr)
+                         .await
+-                        .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?,
+-                    ))
++                        .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?
++                } else {
++                    tokio_socks::tcp::Socks5Stream::connect_with_password(
++                        socks_addr, addr, username, password,
++                    )
++                    .await
++                    .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))?
+                 }
+             }
+-            scheme => Err(io::Error::new(
+-                ErrorKind::ConnectionAborted,
+-                format!("proxy scheme not supported: {}", scheme),
+-            )),
+-        }
++            scheme => {
++                return Err(io::Error::new(
++                    ErrorKind::ConnectionAborted,
++                    format!("proxy scheme not supported: {}", scheme),
++                ));
++            }
++        };
++        Ok(Self::from_tcp(stream.into_inner()))
+     }
+ 
+     pub(crate) async fn disconnect(&mut self) -> std::io::Result<()> {
+-        match self {
+-            Self::Tcp(stream) => stream.shutdown().await,
+-            #[cfg(feature = "proxy")]
+-            Self::ProxySocks5(stream) => stream.shutdown().await,
+-        }
++        self.writer.shutdown().await
+     }
+ }

@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/gm-net", "crates/gm-opus", "crates/gm-core", "crates/gm-ffi", "crates/gm-cli"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[workspace.dependencies]
+grammers-client = { version = "0.12", default-features = false }
+grammers-mtsender = "0.12"
+grammers-mtproto = "0.12"
+grammers-session = { version = "0.12", default-features = false }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }
+
+# Chép nguyên từ GramMini (core/vendor + core/patches): grammers-mtsender vá cho lõi tự mở kết nối tới DC (MTProxy, SOCKS5…);
+# grammers-client vá build_peer_map công khai — xem patches/
+[patch.crates-io]
+grammers-mtsender = { path = "vendor/grammers-mtsender" }
+grammers-client = { path = "vendor/grammers-client" }
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,16 @@
+GramMini: Client::build_peer_map công khai — grammers-client 0.12.0
+- dựng Message từ phản hồi API thô (messages.getReplies / getForumTopics của chủ đề diễn đàn) như grammers làm bên trong
+
+diff -ru a/src/client/chats.rs b/src/client/chats.rs
+--- a/src/client/chats.rs
++++ b/src/client/chats.rs
+@@ -909,7 +909,8 @@
+         ActionSender::new(self, peer)
+     }
+ 
+-    pub(crate) async fn build_peer_map(
++    /// GramMini: công khai để dựng `Message` từ phản hồi API thô (vd. `messages.getReplies` của chủ đề diễn đàn).
++    pub async fn build_peer_map(
+         &self,
+         users: Vec<tl::enums::User>,
+         chats: Vec<tl::enums::Chat>,

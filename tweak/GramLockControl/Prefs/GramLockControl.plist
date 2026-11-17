@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>entry</key>
+	<dict>
+		<key>cell</key>
+		<string>PSLinkCell</string>
+		<key>icon</key>
+		<string>GramLockControl.png</string>
+		<key>label</key>
+		<string>GramLockControl</string>
+	</dict>
+	<key>title</key>
+	<string>GramLockControl</string>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Màn hình khoá cho GramMusic</string>
+			<key>footerText</key>
+			<string>Khi GramMusic đang phát: khung nhỏ phía trên «trượt để mở khoá» có lời đang hát, thanh tiến trình (kéo để tua) và nút bài trước / phát / bài sau. Tắt nếu xung đột với tweak màn hình khoá khác — tắt là tweak không làm gì nữa.</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Bật</string>
+			<key>defaults</key>
+			<string>vn.grammusic.lockcontrol</string>
+			<key>key</key>
+			<string>enabled</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>vn.grammusic.lockcontrol/prefs</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Hiện trên màn hình khoá</string>
+			<key>footerText</key>
+			<string>Lời bài hát cần bật trong GramMusic → Cài đặt → Lời bài hát, và bài có lời chạy theo thời gian (LRCLIB).</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Lời bài hát</string>
+			<key>defaults</key>
+			<string>vn.grammusic.lockcontrol</string>
+			<key>key</key>
+			<string>lyrics</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>vn.grammusic.lockcontrol/prefs</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Thanh tiến trình</string>
+			<key>defaults</key>
+			<string>vn.grammusic.lockcontrol</string>
+			<key>key</key>
+			<string>progress</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>vn.grammusic.lockcontrol/prefs</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Nút điều khiển</string>
+			<key>defaults</key>
+			<string>vn.grammusic.lockcontrol</string>
+			<key>key</key>
+			<string>controls</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>vn.grammusic.lockcontrol/prefs</string>
+		</dict>
+	</array>
+</dict>
+</plist>

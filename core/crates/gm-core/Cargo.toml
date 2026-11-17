@@ -1,0 +1,30 @@
+[package]
+name = "gm-core"
+description = "GramMusic: lõi (phiên đăng nhập, thư viện nhạc từ Telegram, máy chủ phát nội bộ cho AVPlayer)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gm-net = { path = "../gm-net" }
+# Opus (.opus, OGG chứa Opus): libopus 1.4 của GramMini
+gm-opus = { path = "../gm-opus" }
+grammers-client = { workspace = true }
+grammers-mtsender.workspace = true
+grammers-session = { workspace = true, features = ["serde"] }
+tokio = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Giải mã FLAC / OGG Vorbis (AVPlayer của iOS 5 / 6 không đọc được) → WAV 16 bit cho cổng phát — Rust thuần, tua được (DECISIONS M8)
+symphonia = { version = "0.5", default-features = false, features = ["flac", "ogg", "vorbis"] }
+# Lời bài hát (LRCLIB, HTTPS): rustls + bộ chứng chỉ gốc Mozilla đóng trong tệp chạy — iOS 5 / 6 không tự vào được trang HTTPS mới
+# (TLS / chứng chỉ gốc cũ). ring vá cho armv7 Apple: tools/rust/cargo-ios6.sh (vendor-ring.sh), như GramMini.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+
+[target.'cfg(unix)'.dependencies]
+# statvfs (chỗ trống của máy), utimes (đánh dấu tệp đệm vừa dùng)
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "net", "time"] }
+sha2 = "0.11"

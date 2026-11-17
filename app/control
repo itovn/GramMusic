@@ -1,0 +1,10 @@
+Package: vn.grammusic.app
+Name: GramMusic
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Nghe nhạc từ Telegram trên iPhone / iPad iOS 5 / iOS 6 (ứng dụng không chính thức, dùng Telegram API). Có MTProxy.
+Maintainer: GramMusic
+Author: GramMusic
+Section: Multimedia
+Icon: file:///Applications/GramMusic.app/Icon@2x.png
+Depends: firmware (>= 5.0), mobilesubstrate, preferenceloader

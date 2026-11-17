@@ -1,0 +1,11 @@
+[package]
+name = "gm-opus"
+description = "GramMusic (chép từ GramMini): libopus 1.4 (vendor/opus-1.4, dựng bằng cc) + đọc / ghi OGG, OGG/Opus ↔ WAV"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+links = "opus"
+
+[build-dependencies]
+cc = "1"
