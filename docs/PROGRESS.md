@@ -139,6 +139,13 @@
   (giữ kết nối khi tải lỗi tạm thời, `play.ready`) và app (tua khi có dữ liệu, không hỏi thuộc tính AVPlayerItem mỗi lần, dựng lại
   trình phát khi mediaserverd khởi động lại). Thử trên iPhone 5: hết bị giết; giết tay mediaserverd → 3 giây sau phát tiếp đúng chỗ.
   Lõi 38 test, gm-net 27 test.
+- Anh báo (iPad mini): để app nghỉ lâu rồi vào lại không phát được — iOS thu hồi cổng phát 127.0.0.1 của app bị treo (lỗi -1004).
+  Lõi mở lại cổng (giữ số cổng), app gọi khi hoạt động lại / trước khi phát / khi gặp -1004 (M23). Tái hiện thật trên iPad mini (máy
+  tự khoá): cổng bị thu hồi, mở app là mở lại, phát được.
+
+## 17/11/2026 — phát hành 1.0.2
+
+- Sửa mất tiếng khi mạng chập chờn (M22) và không phát được sau khi app nằm nền lâu (M23). Anh thử trên iPad mini: ổn.
 
 ### Còn lại
 

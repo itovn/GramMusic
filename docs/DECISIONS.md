@@ -271,3 +271,24 @@ dựng, giao diện) — ghi ở đây những gì riêng của GramMusic.
   `ready_at_waits_for_data_at_position` (WAV từ FLAC, tệp gốc; mất mạng → `false` khi hết giờ chờ). Tệp mẫu mới
   `tests/data/noise44_8s.flac` (8 giây nhiễu, 1,4 MB — đủ nhiều khúc để có «khúc giữa»).
 
+## M23. Mở lại cổng phát khi iOS thu hồi lúc app nằm nền — 17/11/2026
+
+- Anh báo (iPad mini 1, bản 1.0.1): để app nghỉ lâu rồi vào lại thì không phát được bài nào. Nhật ký: mọi item lỗi
+  `NSURLErrorDomain -1004` «Không thể kết nối máy chủ» tới `http://127.0.0.1:63899/…`; lõi không nhận yêu cầu nào (không có dòng
+  `phát: GET`); app coi là bài lỗi, nhảy qua cả chục bài.
+- Nguyên nhân: tạm dừng → app nằm nền bị treo; iOS thu hồi cổng nghe (listening socket) của app bị treo — cổng phát chết hẳn, lõi vẫn
+  đưa URL cũ. Côn Bằng TV Legacy gặp đúng chuyện này (bản vá `0002-revive-local-ports`) — làm theo cùng cách.
+- Sửa:
+  - Lõi: cổng phát mở lại được — `Streams::revive` / lệnh `stream.revive`: thử kết nối vào chính cổng, chết thì bỏ việc nhận cũ
+    và mở lại **đúng số cổng cũ** nếu được (item đang mở dùng tiếp địa chỉ cũ), không thì cổng khác. `url()` (mọi `play.url`) cũng
+    kiểm trước khi đưa địa chỉ.
+  - App: `applicationDidBecomeActive` gọi `stream.revive`; `play` kiểm cổng trước khi cho AVPlayer đọc tiếp (bấm phát ở màn hình khoá /
+    tai nghe đánh thức app ngay ở nền — không qua `applicationDidBecomeActive`; lõi không trả lời trong 1,5 giây thì phát luôn);
+    item lỗi `-1004` → mở lại cổng, phát lại đúng bài ở đúng chỗ (một lần mỗi bài) thay vì nhảy bài.
+- Test lõi `revive_reopens_reclaimed_port`: giả thu hồi (bỏ việc nhận → kết nối bị từ chối) → `revive` mở lại đúng số cổng, URL cũ
+  phát được; cổng còn sống thì không đụng. Lệnh thử `stream.drop` (giả thu hồi trên máy thật).
+- Thử trên máy: iPhone 5 — đóng cổng (`stream.drop`) rồi bấm phát / đưa app xuống nền rồi mở lại → mở lại đúng cổng, phát tiếp. iPad mini 1
+  (tái hiện thật): dừng nhạc, app nằm nền 6 phút, máy tự khoá 7 phút → lõi ghi «nhận kết nối lỗi: Bad file descriptor (os error 9)»
+  (iOS đã thu hồi cổng); mở app → mở lại đúng cổng 64109 sau 1 ms, bấm phát → phát bình thường. Nằm nền 10 phút mà máy không khoá
+  (iPhone 5) thì iOS chưa thu hồi.
+

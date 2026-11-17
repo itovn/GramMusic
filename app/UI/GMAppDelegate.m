@@ -136,6 +136,12 @@
 - (void)applicationDidBecomeActive:(UIApplication *)application {
     if ([GMTheme wantsDark] != [GMTheme dark]) [self reloadTheme];
     [GMCore call:@"net.check" args:nil done:nil];
+    // Nằm nền lâu (tạm dừng → app bị treo): iOS thu hồi cổng phát 127.0.0.1 → mở lại trước khi trình phát đọc (M23)
+    [GMCore call:@"stream.revive" args:@{} done:^(id ok, NSDictionary *err) {
+        if ([[ok objectForKey:@"revived"] boolValue]) {
+            GMLog(@"phát: cổng phát bị iOS thu hồi lúc nằm nền — đã mở lại cổng %@", [ok objectForKey:@"port"]);
+        }
+    }];
 }
 
 - (void)applicationDidEnterBackground:(UIApplication *)application {

@@ -269,7 +269,10 @@ pub struct Streams {
     ahead: AtomicU64,
     sem: Arc<Semaphore>,
     token: String,
-    port: Mutex<Option<u16>>,
+    /// Cổng phát đang mở: số cổng + việc nhận kết nối (bỏ được khi mở lại — M23)
+    port: Mutex<Option<(u16, tokio::task::AbortHandle)>>,
+    /// Một lượt mở / kiểm tra cổng một lúc
+    port_gate: tokio::sync::Mutex<()>,
     /// Tìm bài theo khoá (thư viện của lõi).
     resolve: Box<dyn Fn(&str) -> Option<Song> + Send + Sync>,
 }
@@ -294,6 +297,7 @@ impl Streams {
             sem: Arc::new(Semaphore::new(4)),
             token,
             port: Mutex::new(None),
+            port_gate: tokio::sync::Mutex::new(()),
             resolve,
         })
     }
@@ -756,35 +760,67 @@ impl Streams {
         Ok(buf)
     }
 
-    /// Mở cổng phát (một lần); trả số cổng.
+    /// Mở cổng phát nếu chưa; trả số cổng. Cổng đã mở mà không còn nhận kết nối thì mở lại (`revive`).
     pub async fn listen(self: &Arc<Self>) -> io::Result<u16> {
-        if let Some(p) = *lock(&self.port) {
-            return Ok(p);
+        Ok(self.ensure_port(true).await?.map(|(p, _)| p).unwrap_or(0))
+    }
+
+    /// Quay lại app: iOS thu hồi cổng nghe của app nằm nền lâu (tạm dừng → app bị treo) — kết nối vào cổng bị từ chối, AVPlayer báo
+    /// -1004 «không kết nối được máy chủ» với mọi bài. Cổng chết thì mở lại, giữ số cổng cũ nếu được (item đang mở dùng tiếp địa
+    /// chỉ cũ — M23). Trả (cổng, vừa mở lại?); chưa mở cổng lần nào thì None.
+    pub async fn revive(self: &Arc<Self>) -> io::Result<Option<(u16, bool)>> {
+        self.ensure_port(false).await
+    }
+
+    /// Thử (lệnh `stream.drop`): giả iOS thu hồi cổng phát — bỏ việc nhận, cổng đóng, kết nối bị từ chối tới khi `revive`.
+    pub fn drop_port(&self) -> Option<u16> {
+        let mut g = lock(&self.port);
+        let (port, task) = g.take()?;
+        task.abort();
+        *g = Some((port, tokio::spawn(async {}).abort_handle()));
+        crate::dlog(&format!("phát: (thử) đóng cổng phát {port}"));
+        Some(port)
+    }
+
+    async fn ensure_port(self: &Arc<Self>, open: bool) -> io::Result<Option<(u16, bool)>> {
+        let _gate = self.port_gate.lock().await;
+        let old = lock(&self.port).as_ref().map(|(p, _)| *p);
+        match old {
+            Some(p) if port_alive(p).await => return Ok(Some((p, false))),
+            None if !open => return Ok(None),
+            _ => {}
         }
-        let l = TcpListener::bind("127.0.0.1:0").await?;
-        let port = l.local_addr()?.port();
-        {
-            let mut p = lock(&self.port);
-            if let Some(old) = *p {
-                return Ok(old); // lệnh khác vừa mở trước
-            }
-            *p = Some(port);
+        if let Some((_, task)) = lock(&self.port).take() {
+            task.abort(); // bỏ việc nhận trên cổng chết (thả cổng)
         }
+        let (l, port) = bind_local(old.unwrap_or(0)).await?;
         let me = Arc::clone(self);
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
+            let mut errs = 0u32;
             loop {
                 match l.accept().await {
                     Ok((s, _)) => {
+                        errs = 0;
                         let me = Arc::clone(&me);
                         tokio::spawn(async move {
                             let _ = me.handle(s).await;
                         });
                     }
-                    Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+                    Err(e) => {
+                        errs += 1;
+                        if errs == 1 {
+                            crate::dlog(&format!("phát: cổng phát {port} nhận kết nối lỗi: {e}"));
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
                 }
             }
         });
-        Ok(port)
+        *lock(&self.port) = Some((port, task.abort_handle()));
+        if let Some(o) = old {
+            crate::dlog(&format!("phát: cổng phát {o} không nhận kết nối (iOS thu hồi lúc app nằm nền) — mở lại cổng {port}"));
+        }
+        Ok(Some((port, old.is_some())))
     }
 
     /// URL phát của bài (mở cổng nếu chưa).
@@ -993,6 +1029,26 @@ impl Streams {
         s.flush().await?;
         s.shutdown().await
     }
+}
+
+/// Cổng nghe 127.0.0.1:port còn nhận kết nối không (thử kết nối vào chính nó).
+async fn port_alive(port: u16) -> bool {
+    matches!(tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(("127.0.0.1", port))).await, Ok(Ok(_)))
+}
+
+/// Mở cổng nghe 127.0.0.1:want (0 = cổng bất kỳ). Cổng cũ vừa bỏ có thể chưa nhả ngay — thử lại một lúc rồi mới lấy cổng khác.
+async fn bind_local(want: u16) -> io::Result<(TcpListener, u16)> {
+    if want != 0 {
+        for _ in 0..10 {
+            match TcpListener::bind(("127.0.0.1", want)).await {
+                Ok(l) => return Ok((l, want)),
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    }
+    let l = TcpListener::bind("127.0.0.1:0").await?;
+    let port = l.local_addr()?.port();
+    Ok((l, port))
 }
 
 /// Xong khi bên kia đóng kết nối (đọc được 0 byte / lỗi). Byte thừa bên kia gửi (yêu cầu kế tiếp trên cùng kết nối) bỏ qua.
@@ -1545,6 +1601,30 @@ mod tests {
         let t0 = Instant::now();
         assert!(!st.ready_at(&song, 100.0, Duration::from_secs(2)).await.unwrap());
         assert!(t0.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// iOS thu hồi cổng nghe của app nằm nền lâu (giả: bỏ việc nhận → cổng đóng): `revive` mở lại đúng số cổng, URL cũ phát tiếp
+    /// được; cổng còn sống thì không đụng (M23).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn revive_reopens_reclaimed_port() {
+        let (st, fake, song, dir) = setup("revive", (BLOCK * 2) as usize, 0);
+        assert!(st.revive().await.unwrap().is_none(), "chưa mở cổng thì không mở");
+        let url = st.url(&song).await.unwrap();
+        let port = st.listen().await.unwrap();
+        assert_eq!(st.revive().await.unwrap(), Some((port, false)));
+        // «Thu hồi»: bỏ việc nhận kết nối → cổng đóng, kết nối bị từ chối
+        assert_eq!(st.drop_port(), Some(port));
+        for _ in 0..50 {
+            if !port_alive(port).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!port_alive(port).await, "cổng giả thu hồi vẫn nhận kết nối");
+        assert_eq!(st.revive().await.unwrap(), Some((port, true)), "mở lại đúng số cổng cũ");
+        let (h, body) = get(&url, Some("bytes=0-9")).await;
+        assert!(h.starts_with("HTTP/1.1 206"), "{h}");
+        assert_eq!(body, fake.data[..10]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

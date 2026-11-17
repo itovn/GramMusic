@@ -63,6 +63,7 @@ static const NSInteger kMaxFails = 3;
     NSInteger _seekGen;
     double _seekTo;            // vị trí đang chờ (-1 = không)
     BOOL _seekHold;            // mở bài ở giữa bài: chưa cho phát tới khi tua xong (khỏi phát đoạn đầu bài)
+    BOOL _portRetried;         // bài này đã mở lại cổng phát + phát lại một lần sau lỗi -1004 (M23)
 }
 
 + (instancetype)shared {
@@ -544,6 +545,20 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
             }
             return;
         }
+        if (item == _curItem && item.status == AVPlayerItemStatusFailed && [item.error.domain isEqualToString:NSURLErrorDomain] &&
+            item.error.code == NSURLErrorCannotConnectToHost && !_portRetried) {
+            // -1004 «không kết nối được máy chủ» tới cổng phát 127.0.0.1: iOS đã thu hồi cổng lúc app nằm nền — mở lại cổng rồi phát
+            // lại đúng bài, đúng chỗ (bản cũ coi là bài lỗi, nhảy hết bài này sang bài khác — M23)
+            _portRetried = YES;
+            double at = self.position;
+            BOOL play = _wantPlay;
+            NSInteger gen = _gen;
+            GMLog(@"phát: không kết nối được cổng phát (-1004) — mở lại cổng, phát lại bài ở %.0f giây", at);
+            [GMCore call:@"stream.revive" args:@{} done:^(id ok, NSDictionary *err) {
+                if (gen == _gen) [self loadCurrent:play at:at];
+            }];
+            return;
+        }
         if (item == _nextItem && item.status == AVPlayerItemStatusFailed) {
             // Bài nạp sẵn hỏng: bỏ khỏi hàng — hết bài hiện tại thì itemEnded mở bài kế theo cách thường
             GMLog(@"phát: bài nạp sẵn lỗi %@", item.error);
@@ -555,6 +570,7 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
             if (_readyT0) GMLog(@"phát: sẵn sàng sau %lld ms", GMNowMs() - _readyT0);
             _readyT0 = 0;
             _fails = 0;
+            _portRetried = NO;
             if (_resumeAt > 1) {
                 // Mở ở giữa bài (Nghe tiếp, dựng lại trình phát): tua khi có dữ liệu ở đó rồi mới phát
                 double t = _resumeAt;
@@ -739,10 +755,23 @@ static void GMServerDied(void *ctx, AudioSessionPropertyID prop, UInt32 size, co
         return;
     }
     _wantPlay = YES;
-    if (!_seekHold) [_player play];  // đang chờ tua (mở giữa bài): tua xong tự phát
     [self reportPace];
     [self updateNowPlaying];
     [self notify];
+    // Tạm dừng lâu → app bị treo, iOS có thể đã thu hồi cổng phát (M23): kiểm (chết thì mở lại đúng số cổng) rồi mới cho AVPlayer
+    // đọc tiếp. Bấm phát ở màn hình khoá / tai nghe đánh thức app ngay ở nền — không qua applicationDidBecomeActive
+    NSInteger gen = _gen;
+    __block BOOL went = NO;
+    void (^go)(void) = ^{
+        if (went) return;
+        went = YES;
+        if (gen == _gen && _wantPlay && !_seekHold) [_player play];  // đang chờ tua (mở giữa bài): tua xong tự phát
+    };
+    [GMCore call:@"stream.revive" args:@{} done:^(id ok, NSDictionary *err) {
+        if ([[ok objectForKey:@"revived"] boolValue]) GMLog(@"phát: cổng phát bị iOS thu hồi lúc nằm nền — đã mở lại cổng %@", [ok objectForKey:@"port"]);
+        go();
+    }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), go);  // lõi chậm: phát luôn
 }
 
 - (void)pause {

@@ -1549,6 +1549,14 @@ impl Core {
                 self.streams.set_pace(inner.as_deref().unwrap_or(key), pos, playing);
                 Ok(json!({}))
             }
+            "stream.revive" => {
+                // Quay lại app (iOS): cổng phát bị thu hồi lúc nằm nền thì mở lại, giữ số cổng nếu được (M23)
+                match self.streams.revive().await? {
+                    Some((port, revived)) => Ok(json!({"port": port, "revived": revived})),
+                    None => Ok(json!({"revived": false})),
+                }
+            }
+            "stream.drop" => Ok(json!({"port": self.streams.drop_port()})), // thử: giả iOS thu hồi cổng phát (M23)
             "play.ready" => {
                 // Dữ liệu quanh giây `pos` đã có chưa — chờ tối đa `wait` giây (mặc định 20); `ready: false` = chưa, hỏi lại. App
                 // chỉ ra lệnh tua cho AVPlayer khi có (M22)
