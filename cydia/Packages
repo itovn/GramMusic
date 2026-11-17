@@ -17,3 +17,22 @@ Name: GramMusic
 Depiction: https://itovn.github.io/GramMusic/cydia/depiction.html
 Homepage: https://itovn.github.io/GramMusic/
 
+Package: vn.grammusic.app
+Version: 1.0.1
+Architecture: iphoneos-arm
+Maintainer: GramMusic
+Installed-Size: 6456
+Depends: firmware (>= 5.0), mobilesubstrate, preferenceloader
+Filename: debs/vn.grammusic.app_1.0.1_iphoneos-arm.deb
+Size: 3122250
+MD5sum: 6a4b1f3454b6f02afdfe40c34bbda442
+SHA1: aaedb627b5e57224b016d8a8283d2437b3e95fc7
+SHA256: e8be9c0692bf57b9c9bfd006c78c367b80d107126e6af9d2eff9fd33b0598278
+Section: Multimedia
+Description: Nghe nhac Telegram tren iOS 5 / 6: FLAC, loi bai hat, dieu khien tren man hinh khoa (khong chinh thuc)
+Author: GramMusic
+Icon: file:///Applications/GramMusic.app/Icon@2x.png
+Name: GramMusic
+Depiction: https://itovn.github.io/GramMusic/cydia/depiction.html
+Homepage: https://itovn.github.io/GramMusic/
+
