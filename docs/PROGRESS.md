@@ -235,4 +235,9 @@
 - Phát hành 1.0.4: gói 3.209.030 byte (sha256 `3503249b…`), có chữ ký `.deb.sig`; `symcheck` 404 ký hiệu (gồm `gmupdate`), thiếu 0
   trên iOS 6.1.4 (iPhone 5 đen), iOS 6.1.3 (iPad mini 1), iOS 5.1.1 (iPad 1).
 - [ ] Sao lưu `keys/ota-sign.key` ra ngoài máy (mất khoá → máy chạy 1.0.4 phải cập nhật qua Cydia một lần).
-- [ ] Thử trọn luồng OTA (bản thử mang số bản cũ hơn → 1.0.4 trên GitHub).
+- **OTA trọn vẹn — đạt** (iPhone 5 đen, iOS 6.1.4: bản thử mang số 1.0.3 → 1.0.4 trên GitHub): 11 giây sau khi mở app hiện «Có bản
+  mới 1.0.4» kèm ghi chú phát hành → «Cập nhật» → tải gói 3 giây → `gmupdate → 0` → `dpkg -i` bản chép trong /var/root → 0 →
+  respring → app tự mở lại sau 14 giây ở bản 1.0.4 («bản mới nhất 1.0.4 (đang dùng 1.0.4)»); tệp tải đã dọn. Máy đen giờ chạy bản
+  phát hành 1.0.4. Chưa thử trọn luồng trên iOS 5 (mã giống GramMini — đã thử trên iPad 1; chữ ký đã thử trên iPad 1 ở trên).
+- Trang giới thiệu «Bản 1.0.4» + biểu tượng mới (favicon, apple-touch-icon, `img/icon.png`, `cydia/CydiaIcon.png`); nguồn Cydia giữ
+  1.0.2 / 1.0.3 / 1.0.4; GitHub **v1.0.4** (gói + `.deb.sig`, API latest có `digest` SHA-256 khớp).
