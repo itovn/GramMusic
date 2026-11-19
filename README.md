@@ -43,6 +43,8 @@ iOS 5.0 – 6.1.x, đã jailbreak (cần MobileSubstrate, PreferenceLoader): iPh
   SpringBoard (tweak GramLockControl cho màn hình khoá).
 - **Tay:** tải `vn.grammusic.app_<bản>_iphoneos-arm.deb` ở [Releases](https://github.com/itovn/GramMusic/releases), chép vào máy,
   `dpkg -i` rồi khởi động lại SpringBoard.
+- **Cập nhật:** từ bản 1.0.4 app tự báo khi có bản mới (hoặc Cài đặt → «Phiên bản») và tự cài — chỉ cài gói có chữ ký số của người
+  phát hành, cài xong máy khởi động lại màn hình chính rồi mở lại app. Bản 1.0.3 trở về trước: cập nhật qua Cydia một lần.
 
 ## Dựng từ mã nguồn
 
@@ -52,6 +54,9 @@ Máy Ubuntu có [Theos](https://theos.dev) (SDK iPhoneOS 9.3) và Rust nightly (
    `api_hash=…` — không có trên git). Tuỳ chọn: mã hồ sơ NextDNS vào `keys/nextdns.txt` (không có thì DNS mã hoá đi thẳng
    Cloudflare → Google).
 2. `bash tools/build-app.sh` — bản thử (có công cụ thử `app/Debug/`); `bash tools/build-release.sh` — bản phát hành.
+3. Cập nhật OTA chỉ cài gói có chữ ký khớp chứng chỉ trong `app/Helper/ota_cert.h`: bản tự dựng muốn dùng OTA thì tạo khoá riêng
+   (`keys/ota-sign.key` / `.crt`), thay chứng chỉ trong `ota_cert.h` và `GMUpdateURL` (Info.plist), ký gói bằng
+   `tools/sign-release.sh`.
 
 Lõi dựng cho armv7 Cortex-A8 bằng target tự định nghĩa (`tools/rust/armv7-apple-ios6.json`, `-Z build-std`); thư viện mã hoá `ring`
 được vá cho ARM 32-bit của Apple (`tools/rust/vendor-ring.sh`). Chạy thử lõi trên PC:

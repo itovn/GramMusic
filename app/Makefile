@@ -29,6 +29,19 @@ GramMusic_LDFLAGS = -L$(CORE_LIB_DIR) -lgm_ffi -Wl,-dead_strip
 
 include $(THEOS_MAKE_PATH)/application.mk
 
+# Công cụ cài bản cập nhật OTA (Helper/gmupdate.c, chép từ GramMini — DECISIONS M26): quyền root nhờ setuid — layout/DEBIAN/postinst
+# đặt chown root + chmod 4755. Quyền com.apple.springboard.launchapplications để mở lại app sau khi cài + khởi động lại SpringBoard.
+TOOL_NAME = gmupdate
+gmupdate_FILES = Helper/gmupdate.c
+gmupdate_FRAMEWORKS = CoreFoundation Security
+gmupdate_INSTALL_PATH = /usr/libexec/grammusic
+gmupdate_CODESIGN_FLAGS = -SHelper/entitlements.plist -Hsha1
+include $(THEOS_MAKE_PATH)/tool.mk
+
+# postinst cần quyền chạy (tệp chép từ Windows không giữ bit x)
+before-package::
+	chmod 0755 $(THEOS_STAGING_DIR)/DEBIAN/postinst
+
 # Tweak SpringBoard đi kèm: khung điều khiển + lời bài hát trên màn hình khoá iOS 5 / 6 (bật / tắt trong Cài đặt của iPhone → GramLockControl)
 # — DECISIONS M20
 SUBPROJECTS += ../tweak/GramLockControl

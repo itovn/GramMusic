@@ -5,6 +5,7 @@
 #import "GMProxyViewController.h"
 #import "GMRootController.h"
 #import "GMTheme.h"
+#import "GMUpdate.h"
 
 /// Bảng chọn dùng khối (UIActionSheet không giữ delegate).
 @interface GMChoice : NSObject <UIActionSheetDelegate, UIAlertViewDelegate>
@@ -203,8 +204,7 @@ static NSString *GMAheadText(NSInteger secs) {
         c.textLabel.text = @"Phiên bản";
         c.detailTextLabel.text = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
         c.imageView.image = [GMTheme settingsIcon:@"info"];
-        c.accessoryType = UITableViewCellAccessoryNone;
-        c.selectionStyle = UITableViewCellSelectionStyleNone;
+        c.accessoryType = UITableViewCellAccessoryDisclosureIndicator;  // chạm: kiểm tra bản mới (OTA — M26)
     } else {
         c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
         c.textLabel.text = @"Đăng xuất";
@@ -265,6 +265,8 @@ static NSString *GMAheadText(NSInteger secs) {
                 [app reloadTheme];
             });
         }
+    } else if (ip.section == GMSecAbout) {
+        [GMUpdate checkManual];
     } else if (ip.section == GMSecLogout) {
         GMConfirm(@"Đăng xuất?", @"Bài đã tải về máy vẫn giữ. Đăng nhập lại để nghe tiếp nhạc từ Telegram.", @"Đăng xuất", ^{
             [GMCore call:@"auth.logout" args:nil done:nil];

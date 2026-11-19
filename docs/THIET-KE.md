@@ -166,8 +166,8 @@ Giao diện iOS 6 + kính của GramMini (D23 — anh đã duyệt): hình nền
 | **Bảng «⋯»** | Phát tiếp theo, Thêm vào hàng chờ, Yêu thích, Thêm vào playlist…, Tải về máy / Xoá bản đã tải, Mở nguồn, (trong playlist) Bỏ khỏi playlist |
 
 Thanh dưới tự làm (GMRootController — API chứa màn con của iOS 5) thay UITabBarController để đặt thanh phát nhỏ giữa nội dung và
-thanh dưới. Biểu tượng mục / nút tự vẽ (GMArt, GMTheme). Biểu tượng app: theo mẫu anh đưa — ô vuông viền crôm, máy bay giấy giữa tai nghe,
-nốt nhạc, sóng âm (`tools/icon/make_icon.py`, DECISIONS M6).
+thanh dưới. Biểu tượng mục / nút tự vẽ (GMArt, GMTheme). Biểu tượng app: theo mẫu anh đưa — ô bo góc viền kính neon xanh → tím, máy bay giấy có
+nút phát, sóng âm, nốt nhạc (`tools/icon/make_icon.py`, DECISIONS M25; mẫu trước: M6).
 
 ---
 
@@ -195,7 +195,7 @@ Xem [FFI.md](FFI.md). Hai hàm C như GramMini (`gm_init`, `gm_call`), JSON hai 
 | **Thẻ ID3 / MP4** | Đọc album, số bài, năm, **ảnh bìa nhúng** từ khúc đầu đã tải → bài không có ảnh thu nhỏ trên Telegram vẫn có bìa |
 | **Lời bài hát** (LRCLIB, chỉ khi người dùng bật) | Lõi có rustls (bộ gốc Mozilla) như OTA của GramMini; `GET https://lrclib.net/api/get?track_name&artist_name&duration`, lời đồng bộ `[mm:ss.xx]` chạy theo bài |
 | **Nhạc trên máy** | MPMediaQuery (thư viện iPod — bài không DRM phát bằng `ipod-library://`), tệp nhạc trong máy (app ở /Applications không sandbox — trình duyệt tệp của GramMini D16) |
-| **OTA, nguồn Cydia** | Như GramMini (GitHub Releases + công cụ setuid, kiểm SHA-256) |
+| **OTA, nguồn Cydia** | Như GramMini (GitHub Releases + công cụ setuid, kiểm SHA-256 + chữ ký số) — có từ 1.0.4 (DECISIONS M26) |
 
 ## 9. Giai đoạn 3 (nếu cần)
 

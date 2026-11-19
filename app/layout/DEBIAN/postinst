@@ -1,0 +1,15 @@
+#!/bin/sh
+# Công cụ cài bản cập nhật OTA cần quyền root: dpkg -i, đóng / mở lại app, khởi động lại SpringBoard — app/Helper/gmupdate.c (M26)
+chown root:wheel /usr/libexec/grammusic/gmupdate
+chmod 4755 /usr/libexec/grammusic/gmupdate
+# SpringBoard iOS 6 giữ biểu tượng đã dựng trong IconsCache: xoá mục của app để biểu tượng mới hiện khi SpringBoard khởi động
+# lại (GramMini D35). Chỉ là bộ đệm, SpringBoard tự dựng lại.
+rm -f /var/mobile/Library/Caches/com.apple.IconsCache/vn.grammusic.app_*
+# Khởi động lại SpringBoard sau khi cài / cập nhật (tweak GramLockControl, biểu tượng mới):
+# - cập nhật OTA: gmupdate tự làm sau dpkg (đặt GRAMMUSIC_OTA=1) → bỏ qua ở đây;
+# - Cydia: xin nút «Restart SpringBoard»;
+# - cài tay bằng dpkg qua SSH: không làm gì.
+if [ "$1" = configure ] && [ -z "$GRAMMUSIC_OTA" ] && [ -n "$CYDIA" ]; then
+    eval "echo 'finish:restart' >&${CYDIA%% *}"
+fi
+exit 0

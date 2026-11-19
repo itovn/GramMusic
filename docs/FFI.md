@@ -77,6 +77,8 @@ void gm_call(const char *request_json, gm_cb on_result, void *ctx);
 | `settings.get` | — | `{ahead_secs, lyrics, secure_dns, dns_providers}` — tải trước bao nhiêu giây (0 = cả bài, mặc định 60), lời bài hát đã bật chưa (mặc định tắt), DNS mã hoá (mặc định bật), chuỗi nhà cung cấp («NextDNS → Cloudflare → Google») |
 | `settings.set` | `ahead_secs`? (≤ 3600), `lyrics`?, `secure_dns`? | `{}` — có hiệu lực ngay |
 | `net.dns` | `host`, `fail`? ([nhãn máy chủ] coi như bị chặn), `fresh`? | `{ip, via (máy chủ đã trả lời / «DNS của máy»), ms, secure}`; tên miền không có → `NO_DOMAIN` (M17, để thử) |
+| `http.get` | `url` (https), `headers`? | `{code, text}` — OTA (M26): trả lời ≤ 2 MB; chuyển hướng cũng phải https |
+| `http.download` | `url` (https), `path` | `{path, size, sha256}` — tải qua `<path>.part` (0600), ≤ 128 MB, treo 60 giây → `TIMEOUT`; sự kiện `http.progress` |
 | `lyrics.get` | `key` (+ `title`, `artist`, `dur` cho bài trên máy), `refresh`? | `{found, synced, lines: [{t (giây), s}], plain, instrumental, title, artist, v}` — LRCLIB (M14, M19: ưu tiên bản có lời chạy); bản đã lưu trả ngay; chưa bật → lỗi `LYRICS_OFF`; mất mạng → `NETWORK` |
 
 Lỗi chung: `FLOOD_WAIT` (kèm `value` giây), `NETWORK`, `TIMEOUT`, `NOT_STARTED`, `BAD_ARGS`, `NO_METHOD`, `PEER_UNKNOWN`, `IO`, hoặc
@@ -94,6 +96,7 @@ tên lỗi RPC của Telegram.
 | `stream.error` | `key`, `code`, `msg` |
 | `dl.progress` / `dl.done` / `dl.error` | `key` (+ `have`, `total` / `code`, `msg`) — hàng tải về máy |
 | `cache.cleared` | — |
+| `http.progress` | `url`, `done`, `total` (byte; 0 = máy chủ không báo) — ~3 lần / giây khi `http.download` |
 
 ## Cổng phát
 

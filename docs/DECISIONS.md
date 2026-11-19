@@ -364,3 +364,49 @@ dựng, giao diện) — ghi ở đây những gì riêng của GramMusic.
 - Test lõi thêm: `truncated_headers_do_not_panic`, `read_error_is_not_end_of_file` (Opus), `raw_meta_reads_wav_and_m4a`,
   `raw_wav_tail_metadata_served_without_pace`, `clear_keeps_busy_local_decode`, `main_artist` với «İ», `remove_songs` theo cách
   đánh số kênh. gm-core 44, gm-net 27.
+
+## M25. Biểu tượng mới theo mẫu `logo2.png` — 19/11/2026
+
+- Anh đưa mẫu `Tham_Khao/logo/logo2.png` (2752 × 1536, như logo1): ô bo góc viền kính neon xanh → tím, nền vũ trụ có lưới, máy bay
+  giấy kính có nút phát ở giữa, sóng âm hai bên, nốt nhạc. Thay biểu tượng logo1 (M6) từ bản sau 1.0.3.
+- Cắt như M6, `make_icon.py` giữ số đo của từng mẫu (`REFS`): viền ngoài x 823–1928, y 207–1350 (đo bằng độ sáng); lùi 2 px bỏ viền
+  tối và vệt sáng mảnh ngoài viền. Đáy viền có gờ dày 3D nên ô cao hơn rộng ~3 % (1102 × 1140) → bo góc trên ô cắt rồi co dọc về
+  1024 × 1024 (không cắt mất gờ đáy). Bán kính góc đo trên đường chéo hai góc dưới (hai góc trên có đốm sáng): mép cách góc ~69 px →
+  r ≈ 236 (~21 %, lớn hơn mặt nạ iOS ~17,5 % → iOS không cắt vào viền). Đốm sáng / quầng sáng ngoài viền bị bỏ.
+- Biểu tượng dòng GramLockControl trong Cài đặt (bản sao cỡ 29 / 58 của app) giờ `make_icon.py` chép luôn, khỏi lệch nhau.
+- Thử trên iPhone 5 đen (iOS 6.1.4): sau `dpkg -i` + `uicache` màn hình chính vẫn hiện biểu tượng cũ — SpringBoard iOS 6 giữ
+  biểu tượng đã dựng (trong bộ nhớ và `Caches/com.apple.IconsCache` — GramMini D35) → respring mới thấy. Từ 1.0.4 gói có
+  `postinst` (M26): xoá mục `vn.grammusic.app_*` trong IconsCache, Cydia hiện nút «Restart SpringBoard», OTA tự respring. Góc
+  sạch, viền không bị mặt nạ cắt.
+- Rủi ro M6 tăng lên: mẫu mới bỏ tai nghe, máy bay giấy là hình chính giữa ô (vẫn khác logo Telegram: máy bay kính 3D có nút phát,
+  hướng khác, nền vũ trụ + sóng âm, không phải máy bay trắng trên đĩa xanh phẳng). Nếu Telegram phàn nàn / khoá api_id thì thay máy
+  bay bằng hình khác như M6 đã ghi.
+
+## M26. Cập nhật OTA — chép từ GramMini (bản 1.0.4) — 19/11/2026
+
+- Anh nhờ: app chưa có OTA thì bổ sung rồi phát hành một lượt cùng biểu tượng mới (M25). Chép nguyên bộ OTA của GramMini (D33 — đã
+  kiểm bảo mật, thử trọn luồng trên iOS 5.1.1 và iOS 6), chỉ đổi tên / đường dẫn:
+  - App (`GMUpdate`): hỏi `GMUpdateURL` (Info.plist — `api.github.com/repos/itovn/GramMusic/releases/latest`) 10 giây sau khi mở
+    app và khi quay lại app (tối đa 6 giờ một lần); Cài đặt → «Phiên bản» chạm để kiểm ngay. Có bản mới hơn → hỏi (kèm ghi chú phát
+    hành), «Để sau» = không hỏi lại bản đó trong 24 giờ. «Cập nhật» → tải `vn.grammusic.app_<bản>_iphoneos-arm.deb` + `.deb.sig`
+    (chỉ từ `github.com/itovn/GramMusic/releases/download/`) vào `~/Documents/GramMusic-update`, kiểm kích thước + SHA-256
+    (`digest` của GitHub) → gọi `/usr/libexec/grammusic/gmupdate`.
+  - `gmupdate` (setuid root — postinst đặt chown + 4755): chỉ nhận lời gọi từ chính GramMusic (tiến trình cha), chép gói vào
+    `/var/root/GramMusic-update` (0700), kiểm **chữ ký RSA-3072** (PKCS#1 v1.5 + SHA-256) trên bản chép, đúng gói
+    `vn.grammusic.app`, bản mới hơn bản đang cài → tách nền, đóng app, `dpkg -i`, respring, mở lại app. Nhật ký
+    `/var/root/GramMusic-update/install.log`.
+  - Lõi: `http.get` / `http.download` (FFI.md) — chỉ https (cả chuyển hướng), giới hạn cỡ, SHA-256 lúc tải, sự kiện `http.progress`.
+    Khác GramMini: tra tên miền qua DNS mã hoá (như lời bài hát — M17), và `http.*` không đổi trạng thái mạng của app (GitHub được
+    / không được không nói gì về đường tới Telegram).
+- **Khoá ký riêng của GramMusic** (không dùng chung khoá GramMini — lộ khoá của app này không cài được gói lạ vào app kia):
+  `keys/ota-sign.key` + `keys/ota-sign.crt` (CN=GramMusic OTA signing, tạo 19/11/2026, hết hạn 16/11/2036 — `gmupdate` không xét
+  hạn), chỉ ở máy phát hành, không lên git; chứng chỉ công khai gắn trong `app/Helper/ota_cert.h` (vân tay SHA-256 `8F:F2:51:E7:…`).
+  Phát hành: `tools/build-release.sh` (kiểm có `GMUpdateURL`, không còn mã thử, ký hiệu của cả `gmupdate`) → `tools/sign-release.sh
+  <gói>` → tải `.deb` + `.deb.sig` lên GitHub Release. **Mất khoá riêng → máy đang chạy bản cũ phải cập nhật qua Cydia một lần** —
+  cần sao lưu `keys/ota-sign.key` ra ngoài máy.
+- `postinst` (mới): quyền cho `gmupdate`, xoá IconsCache của app (M25), Cydia → nút «Restart SpringBoard» (tweak GramLockControl,
+  biểu tượng mới), OTA (`GRAMMUSIC_OTA=1`) → `gmupdate` tự respring.
+- Máy đang chạy 1.0.3 trở về trước không có OTA → lên 1.0.4 qua Cydia một lần; từ 1.0.4 các bản sau tự báo trong app.
+- Thử trước khi phát hành: `gmupdate --verify` gói ký đúng → «chữ ký đúng» (0), gói sửa 1 byte → 72 trên iPhone 5 iOS 6.1.4 và
+  iPad 1 iOS 5.1.1 (chỉ chép công cụ vào /tmp, không cài); gọi từ quyền mobile với tệp ngoài thư mục tải → 65. App tự hỏi GitHub
+  (rustls qua lõi) 11 giây sau khi mở: «bản mới nhất 1.0.3 (đang dùng 1.0.4)».

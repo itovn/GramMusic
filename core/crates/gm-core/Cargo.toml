@@ -20,6 +20,8 @@ symphonia = { version = "0.5", default-features = false, features = ["flac", "og
 # Lời bài hát (LRCLIB, HTTPS): rustls + bộ chứng chỉ gốc Mozilla đóng trong tệp chạy — iOS 5 / 6 không tự vào được trang HTTPS mới
 # (TLS / chứng chỉ gốc cũ). ring vá cho armv7 Apple: tools/rust/cargo-ios6.sh (vendor-ring.sh), như GramMini.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+# SHA-256 của gói cập nhật OTA lúc tải (`http.download`, M26) — so với `digest` của GitHub
+sha2 = "0.11"
 
 [target.'cfg(unix)'.dependencies]
 # statvfs (chỗ trống của máy), utimes (đánh dấu tệp đệm vừa dùng)
@@ -27,4 +29,3 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "io-util", "net", "time"] }
-sha2 = "0.11"

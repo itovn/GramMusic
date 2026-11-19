@@ -1,6 +1,6 @@
 Package: vn.grammusic.app
 Name: GramMusic
-Version: 1.0.3
+Version: 1.0.4
 Architecture: iphoneos-arm
 Description: Nghe nhac Telegram tren iOS 5 / 6: FLAC, loi bai hat, dieu khien tren man hinh khoa (khong chinh thuc)
 Maintainer: GramMusic

@@ -182,7 +182,7 @@
 ### Còn lại
 
 - [ ] Ảnh màn hình khoá có khung GramLockControl cho trang giới thiệu (cần anh bấm nút nguồn; dữ liệu mẫu).
-- [ ] OTA (tự cập nhật như GramMini).
+- [x] OTA (tự cập nhật như GramMini) — 1.0.4 (M26).
 - [ ] Mở bài FLAC nhanh hơn khi mạng chậm (lúc mở, AVPlayer đọc thử cuối tệp WAV → lõi phải tải phần cuối tệp FLAC trước).
 - [ ] Lỗi tải của một khúc đang làm hỏng cả lần chờ khúc khác của cùng bài (lỗi lưu chung theo bài) — đã đỡ bằng thử lại; nên tách
   lỗi theo từng khúc.
@@ -214,9 +214,25 @@
 ### Còn lại
 
 - [ ] Ảnh màn hình khoá có khung GramLockControl cho trang giới thiệu (cần anh bấm nút nguồn; dữ liệu mẫu).
-- [ ] OTA (tự cập nhật như GramMini).
+- [x] OTA (tự cập nhật như GramMini) — 1.0.4 (M26).
 - [ ] Mở bài FLAC nhanh hơn khi mạng chậm (lúc mở, AVPlayer đọc thử cuối tệp WAV → lõi phải tải phần cuối tệp FLAC trước).
 - [ ] Lỗi tải của một khúc đang làm hỏng cả lần chờ khúc khác của cùng bài (lỗi lưu chung theo bài) — nên tách lỗi theo từng khúc.
 - [ ] `sources.json` hỏng thì thư viện trống tới lần quét sau (đã giảm khả năng hỏng bằng `sync_all`); nên đọc `library/*.json` độc lập.
 - [ ] iPad 1: đo giải mã + RAM.
 - [ ] iPhone 5 đen: anh đăng nhập để thử GramMusic với Telegram trên máy thứ hai.
+
+## 19/11/2026 — biểu tượng mới (M25), cập nhật OTA (M26), phát hành 1.0.4
+
+- Biểu tượng app theo mẫu mới `Tham_Khao/logo/logo2.png` (viền kính neon, máy bay giấy có nút phát, sóng âm): `make_icon.py` cắt ô
+  biểu tượng (viền ngoài đo bằng độ sáng, bo góc r ≈ 21 %) → 8 cỡ iOS 5 / 6 + biểu tượng GramLockControl trong Cài đặt.
+  Thử trên iPhone 5 đen: màn hình chính hiện biểu tượng mới sau respring, góc sạch (để chụp, tạm dời biểu tượng lên trang 1 bằng
+  `IconState.plist` có sao lưu rồi trả lại bố cục cũ).
+- **OTA** chép từ GramMini (M26): `GMUpdate` + `gmupdate` (setuid, chữ ký RSA-3072 — khoá riêng mới của GramMusic `keys/ota-sign.key`)
+  + lõi `http.get` / `http.download` + `postinst` + `tools/sign-release.sh`; lệnh thử `updateapi` / `updatecheck` / `alertbtn`.
+  Lõi: gm-core 44 phép thử đạt, không cảnh báo clippy mới; app dựng không cảnh báo.
+- Thử trên máy: `gmupdate --verify` đúng / gói sửa → 72 trên iPhone 5 iOS 6.1.4 và iPad 1 iOS 5.1.1; app tự hỏi GitHub sau 11 giây
+  («bản mới nhất 1.0.3 (đang dùng 1.0.4)»); bản phát hành cài lên iPhone đen chạy, không có báo cáo crash.
+- Phát hành 1.0.4: gói 3.209.030 byte (sha256 `3503249b…`), có chữ ký `.deb.sig`; `symcheck` 404 ký hiệu (gồm `gmupdate`), thiếu 0
+  trên iOS 6.1.4 (iPhone 5 đen), iOS 6.1.3 (iPad mini 1), iOS 5.1.1 (iPad 1).
+- [ ] Sao lưu `keys/ota-sign.key` ra ngoài máy (mất khoá → máy chạy 1.0.4 phải cập nhật qua Cydia một lần).
+- [ ] Thử trọn luồng OTA (bản thử mang số bản cũ hơn → 1.0.4 trên GitHub).

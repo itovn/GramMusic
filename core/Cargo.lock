@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "gm-cli"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "gm-core",
  "gm-net",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "gm-core"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "gm-net",
  "gm-opus",
@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "gm-ffi"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "gm-core",
  "gm-net",
@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "gm-net"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "aes",
  "ctr",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "gm-opus"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "cc",
 ]

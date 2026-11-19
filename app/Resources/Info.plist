@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.3</string>
+	<string>1.0.4</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.3</string>
+	<string>1.0.4</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>iPhoneOS</string>
@@ -35,6 +35,9 @@
 		<string>Icon-Small-50.png</string>
 		<string>Icon-Small-50@2x.png</string>
 	</array>
+	<!-- Cập nhật OTA: API bản mới nhất trên GitHub Releases (GMUpdate — M26) -->
+	<key>GMUpdateURL</key>
+	<string>https://api.github.com/repos/itovn/GramMusic/releases/latest</string>
 	<key>UIPrerenderedIcon</key>
 	<true/>
 	<key>MinimumOSVersion</key>

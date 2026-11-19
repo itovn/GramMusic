@@ -1212,7 +1212,9 @@ impl Core {
         // Trạng thái của `dispatch` gộp mọi nhánh (kiểu TL to) — để trên heap (GramMini D20)
         let r = Box::pin(self.dispatch(method, &a)).await;
         let ms = t.elapsed().as_millis();
+        // http.* (OTA — GitHub) không nói gì về đường tới Telegram: không đổi trạng thái mạng
         match &r {
+            _ if method.starts_with("http.") => {}
             Ok(_) => self.set_net(true),
             Err(e) if e.code == "NETWORK" || e.code == "TIMEOUT" => self.set_net(false),
             Err(_) => {}
@@ -1309,6 +1311,115 @@ impl Core {
             t.elapsed().as_millis()
         ));
         Ok(v)
+    }
+
+    /// HTTPS cho cập nhật OTA (M26, chép từ GramMini): `http.get` (`url`, `headers`?) → `{code, text}`; `http.download` (`url`,
+    /// `path`) → tải vào `path` (qua tệp `.part`), sự kiện `http.progress` {url, done, total} ~3 lần / giây → `{path, size, sha256}`.
+    /// Tra tên miền qua DNS mã hoá như lời bài hát (M17).
+    async fn http(self: &Arc<Self>, method: &str, a: &Value) -> Res {
+        use sha2::Digest;
+        static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        // Chỉ HTTPS, chuyển hướng cũng phải HTTPS (GitHub chuyển tệp phát hành sang máy chủ tệp của nó) — GramMini D33
+        let client = CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .dns_resolver(Arc::new(crate::lyrics::DohResolve))
+                .user_agent(concat!("GramMusic/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(Duration::from_secs(20))
+                .redirect(reqwest::redirect::Policy::custom(|at| {
+                    if at.url().scheme() != "https" {
+                        at.error("chuyển hướng sang link không phải https")
+                    } else if at.previous().len() > 5 {
+                        at.stop()
+                    } else {
+                        at.follow()
+                    }
+                }))
+                .build()
+                .unwrap_or_default()
+        });
+        let net = |e: reqwest::Error| CoreError::new("NETWORK", format!("Không tải được: {e}"));
+        let url = arg_str(a, "url")?.to_string();
+        if !url.starts_with("https://") {
+            return Err(CoreError::new("BAD_ARGS", "chỉ tải được link https"));
+        }
+        let mut req = client.get(&url);
+        if let Some(h) = a.get("headers").and_then(Value::as_object) {
+            for (k, v) in h {
+                if let Some(v) = v.as_str() {
+                    req = req.header(k.as_str(), v);
+                }
+            }
+        }
+        if method == "http.get" {
+            let mut resp = req.timeout(Duration::from_secs(40)).send().await.map_err(net)?;
+            let code = resp.status().as_u16();
+            let mut body = Vec::new();
+            while let Some(c) = resp.chunk().await.map_err(net)? {
+                body.extend_from_slice(&c);
+                if body.len() > MAX_HTTP_TEXT {
+                    return Err(CoreError::new("HTTP", "Trả lời quá lớn."));
+                }
+            }
+            return Ok(json!({"code": code, "text": String::from_utf8_lossy(&body)}));
+        }
+        let path = PathBuf::from(arg_str(a, "path")?);
+        let mut resp = req.send().await.map_err(net)?;
+        if !resp.status().is_success() {
+            return Err(CoreError::new("HTTP", format!("Máy chủ trả HTTP {}", resp.status().as_u16())));
+        }
+        let total = resp.content_length().unwrap_or(0);
+        let io = |e: std::io::Error| CoreError::new("IO", e.to_string());
+        if total > MAX_HTTP_DOWNLOAD {
+            return Err(CoreError::new("HTTP", "Tệp quá lớn."));
+        }
+        // Tệp tạm tạo mới, chỉ app đọc ghi (không theo liên kết tượng trưng có sẵn ở tên đoán trước được)
+        let tmp = path.with_extension("part");
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = {
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                o.mode(0o600);
+            }
+            o.open(&tmp).map_err(io)?
+        };
+        let mut hasher = sha2::Sha256::new();
+        let (mut done, mut last) = (0u64, Instant::now());
+        loop {
+            let chunk = match tokio::time::timeout(Duration::from_secs(60), resp.chunk()).await {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(net(e));
+                }
+                Err(_) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(CoreError::new("TIMEOUT", "Tải bị treo quá 60 giây."));
+                }
+            };
+            let Some(chunk) = chunk else { break };
+            if let Err(e) = f.write_all(&chunk) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(io(e));
+            }
+            hasher.update(&chunk);
+            done += chunk.len() as u64;
+            if done > MAX_HTTP_DOWNLOAD {
+                drop(f);
+                let _ = std::fs::remove_file(&tmp);
+                return Err(CoreError::new("HTTP", "Tệp quá lớn."));
+            }
+            if last.elapsed() > Duration::from_millis(300) {
+                (self.emit)(json!({"e": "http.progress", "url": url, "done": done, "total": total}));
+                last = Instant::now();
+            }
+        }
+        drop(f);
+        std::fs::rename(&tmp, &path).map_err(io)?;
+        let sha: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        Ok(json!({"path": path, "size": done, "sha256": sha}))
     }
 
     async fn dispatch(self: &Arc<Self>, method: &str, a: &Value) -> Res {
@@ -1890,6 +2001,7 @@ impl Core {
                 Ok(json!({"freed": freed, "files": n}))
             }
             "lyrics.get" => self.lyrics(a).await,
+            "http.get" | "http.download" => Box::pin(self.http(method, a)).await,
             "net.dns" => {
                 // Thử tra tên miền (M17): `host`, `fail` (nhãn máy chủ coi như bị chặn — thử chuỗi dự phòng), `fresh` (quên đã nhớ)
                 let host = arg_str(a, "host")?.to_string();
@@ -2073,6 +2185,11 @@ fn part_path(path: &std::path::Path) -> std::path::PathBuf {
 pub fn key_parts(key: &str) -> Option<(String, i32)> {
     split_key(key)
 }
+
+/// `http.get`: trả lời tối đa (JSON bản mới nhất của GitHub ~ vài chục KB).
+const MAX_HTTP_TEXT: usize = 2 << 20;
+/// `http.download`: tệp tối đa (gói .deb ~3 MB).
+const MAX_HTTP_DOWNLOAD: u64 = 128 << 20;
 
 #[cfg(test)]
 mod tests {
